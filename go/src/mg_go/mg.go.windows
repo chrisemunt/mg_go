@@ -1,7 +1,7 @@
 /*
    ----------------------------------------------------------------------------
    | Package:     mg_go                                                       |
-   | OS:          Unix                                                        |
+   | OS:          Windows                                                     |
    | Description: An Interface to InterSystems Cache/IRIS and YottaDB         |
    | Author:      Chris Munt cmunt@mgateway.com                               |
    |                         chris.e.munt@gmail.com                           |
@@ -28,29 +28,9 @@
 
 package mg_go
 
-// #cgo LDFLAGS: -ldl 
-// #include <stdio.h> 
-// #include <stdlib.h> 
-// #include <dlfcn.h>
-// int c_dbx_init(void *f)
-// {
-//    return ((int (*)()) f)();
-// }
-// int c_dbx_version(void *f, int index, void *output, int output_len)
-// {
-//    return ((int (*)(int , char *, int)) f)(index, (char *) output, output_len);
-// }
-// int c_dbx_sleep(void *f, int period_ms)
-// {
-//    return ((int (*)(int)) f)(period_ms);
-// }
-// int c_dbx_generic(void *f, void *inputstr, void *outputstr)
-// {
-//    return ((int (*)(unsigned char *, unsigned char *)) f)((unsigned char *) inputstr, (unsigned char *) outputstr);
-// }
-import "C"
 import (
 	"fmt"
+	"syscall"
 	"unsafe"
    "strconv"
 )
@@ -95,8 +75,6 @@ type Database struct {
    index int
    inputbuffer []byte
    outputbuffer []byte
-   Cinputbuffer unsafe.Pointer
-   Coutputbuffer unsafe.Pointer
 }
 
 // Global
@@ -122,31 +100,31 @@ type Result struct {
 }
 
 
-var pf_init          unsafe.Pointer = nil
-var pf_version       unsafe.Pointer = nil
-var pf_open          unsafe.Pointer = nil
-var pf_close         unsafe.Pointer = nil
-var pf_set           unsafe.Pointer = nil
-var pf_get           unsafe.Pointer = nil
-var pf_next          unsafe.Pointer = nil
-var pf_previous      unsafe.Pointer = nil
-var pf_nextnode      unsafe.Pointer = nil
-var pf_delete        unsafe.Pointer = nil
-var pf_defined       unsafe.Pointer = nil
-var pf_merge         unsafe.Pointer = nil
-var pf_increment     unsafe.Pointer = nil
-var pf_lock          unsafe.Pointer = nil
-var pf_unlock        unsafe.Pointer = nil
-var pf_function      unsafe.Pointer = nil
-var pf_classmethod   unsafe.Pointer = nil
-var pf_method        unsafe.Pointer = nil
-var pf_getproperty   unsafe.Pointer = nil
-var pf_setproperty   unsafe.Pointer = nil
-var pf_closeinstance unsafe.Pointer = nil
-var pf_getnamespace  unsafe.Pointer = nil
-var pf_setnamespace  unsafe.Pointer = nil
-var pf_sleep         unsafe.Pointer = nil
-var pf_benchmark     unsafe.Pointer = nil
+var pf_init          *syscall.LazyProc = nil
+var pf_version       *syscall.LazyProc = nil
+var pf_open          *syscall.LazyProc = nil
+var pf_close         *syscall.LazyProc = nil
+var pf_set           *syscall.LazyProc = nil
+var pf_get           *syscall.LazyProc = nil
+var pf_next          *syscall.LazyProc = nil
+var pf_previous      *syscall.LazyProc = nil
+var pf_nextnode      *syscall.LazyProc = nil
+var pf_delete        *syscall.LazyProc = nil
+var pf_defined       *syscall.LazyProc = nil
+var pf_merge         *syscall.LazyProc = nil
+var pf_increment     *syscall.LazyProc = nil
+var pf_lock          *syscall.LazyProc = nil
+var pf_unlock        *syscall.LazyProc = nil
+var pf_function      *syscall.LazyProc = nil
+var pf_classmethod   *syscall.LazyProc = nil
+var pf_method        *syscall.LazyProc = nil
+var pf_getproperty   *syscall.LazyProc = nil
+var pf_setproperty   *syscall.LazyProc = nil
+var pf_closeinstance *syscall.LazyProc = nil
+var pf_getnamespace  *syscall.LazyProc = nil
+var pf_setnamespace  *syscall.LazyProc = nil
+var pf_sleep         *syscall.LazyProc = nil
+var pf_benchmark     *syscall.LazyProc = nil
 
 
 // Create a new database object
@@ -160,11 +138,8 @@ func New(Type string) Database {
    db.InputBufferSize = DBX_INPUT_BUFFER_SIZE
    db.OutputBufferSize = DBX_OUTPUT_BUFFER_SIZE
 
-   db.Cinputbuffer = C.malloc(C.size_t(db.InputBufferSize))
-   db.Coutputbuffer = C.malloc(C.ulong(db.OutputBufferSize))
-
-   db.inputbuffer = (*[1 << 30]byte)(unsafe.Pointer(db.Cinputbuffer))[:]
-   db.outputbuffer = (*[1 << 30]byte)(unsafe.Pointer(db.Coutputbuffer))[:]
+   db.inputbuffer = make([]byte, db.InputBufferSize)
+   db.outputbuffer = make([]byte, db.OutputBufferSize)
 
    return *db
 }
@@ -178,7 +153,7 @@ func (db *Database) Version() string {
    }
    mod_version := Version();
    api_version := make([]byte, 256)
-   C.c_dbx_version(pf_version, C.int(db.index), unsafe.Pointer(&api_version[0]), 256)
+   _, _, _ = pf_version.Call(uintptr(db.index), uintptr(unsafe.Pointer(&api_version[0])), uintptr(256))
 
    version := fmt.Sprintf("%s; %s", mod_version, api_version)
 
@@ -211,7 +186,7 @@ func (db *Database) Open() Result {
    block_add_string(db.inputbuffer[:], &buffer_len, db.EnvVars, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
 
-   C.c_dbx_generic(pf_open, unsafe.Pointer(db.Cinputbuffer), nil)
+   _, _, _ = pf_open.Call(uintptr(unsafe.Pointer(&db.inputbuffer[0])), uintptr(0))
 
    res := get_result(db.inputbuffer)
 
@@ -231,7 +206,7 @@ func (db *Database) Close() Result {
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_close, unsafe.Pointer(db.Cinputbuffer), nil)
+   _, _, _ = pf_close.Call(uintptr(unsafe.Pointer(&db.inputbuffer[0])), uintptr(0))
 
    res := get_result(db.inputbuffer)
 
@@ -251,7 +226,7 @@ func (db *Database) GetNamespace() Result {
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_getnamespace, unsafe.Pointer(db.Cinputbuffer), nil)
+   _, _, _ = pf_getnamespace.Call(uintptr(unsafe.Pointer(&db.inputbuffer[0])), uintptr(0))
 
    res := get_result(db.inputbuffer)
 
@@ -272,7 +247,7 @@ func (db *Database) SetNamespace(Namespace string) Result {
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_setnamespace, unsafe.Pointer(db.Cinputbuffer), nil)
+   _, _, _ = pf_setnamespace.Call(uintptr(unsafe.Pointer(&db.inputbuffer[0])), uintptr(0))
 
    res := get_result(db.inputbuffer)
 
@@ -320,7 +295,7 @@ func (g *Global) Set(args ... interface{}) Result {
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(g.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_set, unsafe.Pointer(g.db.Cinputbuffer), nil)
+   _, _, _ = pf_set.Call(uintptr(unsafe.Pointer(&g.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(g.db.inputbuffer)
 
@@ -338,7 +313,7 @@ func (g *Global) Get(args ... interface{}) Result {
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(g.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_get, unsafe.Pointer(g.db.Cinputbuffer), nil)
+   _, _, _ = pf_get.Call(uintptr(unsafe.Pointer(&g.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(g.db.inputbuffer)
 
@@ -355,7 +330,7 @@ func (g *Global) Next(args ... interface{}) Result {
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(g.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_next, unsafe.Pointer(g.db.Cinputbuffer), nil)
+   _, _, _ = pf_next.Call(uintptr(unsafe.Pointer(&g.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(g.db.inputbuffer)
 
@@ -379,7 +354,7 @@ func (g *Global) Previous(args ... interface{}) Result {
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(g.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_previous, unsafe.Pointer(g.db.Cinputbuffer), nil)
+   _, _, _ = pf_previous.Call(uintptr(unsafe.Pointer(&g.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(g.db.inputbuffer)
 
@@ -403,7 +378,7 @@ func (g *Global) Delete(args ... interface{}) Result {
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(g.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_delete, unsafe.Pointer(g.db.Cinputbuffer), nil)
+   _, _, _ = pf_delete.Call(uintptr(unsafe.Pointer(&g.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(g.db.inputbuffer)
 
@@ -421,7 +396,7 @@ func (g *Global) Defined(args ... interface{}) Result {
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(g.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_defined, unsafe.Pointer(g.db.Cinputbuffer), nil)
+   _, _, _ = pf_defined.Call(uintptr(unsafe.Pointer(&g.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(g.db.inputbuffer)
 
@@ -444,7 +419,7 @@ func (db *Database) Function(args ... interface{}) Result {
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_function, unsafe.Pointer(db.Cinputbuffer), nil)
+   _, _, _ = pf_function.Call(uintptr(unsafe.Pointer(&db.inputbuffer[0])), uintptr(0))
 
    res := get_result(db.inputbuffer)
 
@@ -487,7 +462,7 @@ func (c *Class) ClassMethod(method string, args ... interface{}) Result {
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(c.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_classmethod, unsafe.Pointer(c.db.Cinputbuffer), nil)
+   _, _, _ = pf_classmethod.Call(uintptr(unsafe.Pointer(&c.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(c.db.inputbuffer)
 
@@ -506,7 +481,7 @@ func (c *Class) GetProperty(name string) Result {
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(c.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_getproperty, unsafe.Pointer(c.db.Cinputbuffer), nil)
+   _, _, _ = pf_getproperty.Call(uintptr(unsafe.Pointer(&c.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(c.db.inputbuffer)
 
@@ -524,7 +499,7 @@ func (c *Class) SetProperty(name string, value interface{}) Result {
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(c.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_setproperty, unsafe.Pointer(c.db.Cinputbuffer), nil)
+   _, _, _ = pf_setproperty.Call(uintptr(unsafe.Pointer(&c.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(c.db.inputbuffer)
 
@@ -544,7 +519,7 @@ func (c *Class) Method(method string, args ... interface{}) Result {
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_size(c.db.inputbuffer[:], buffer_len)
 
-   C.c_dbx_generic(pf_method, unsafe.Pointer(c.db.Cinputbuffer), nil)
+   _, _, _ = pf_method.Call(uintptr(unsafe.Pointer(&c.db.inputbuffer[0])), uintptr(0))
 
    res := get_result(c.db.inputbuffer)
 
@@ -556,7 +531,7 @@ func (db *Database) Benchmark(inputstr string) string {
 
    copy(db.inputbuffer[:], inputstr)
 
-   C.c_dbx_generic(pf_benchmark, unsafe.Pointer(db.Cinputbuffer), nil)
+   _, _, _ = pf_benchmark.Call(uintptr(unsafe.Pointer(&db.inputbuffer[0])), uintptr(0))
 
    res := string(db.inputbuffer[:])
 
@@ -579,7 +554,7 @@ func Version() string {
 
 // Sleep for the specified number of milliseconds
 func Sleep(period_ms int) int {
-   C.c_dbx_sleep(pf_sleep,  C.int(period_ms))
+   _, _, _ = pf_sleep.Call(uintptr(period_ms))
    res := 0
 
    return res
@@ -676,38 +651,35 @@ func get_result(buffer []byte) (Result) {
 
 
 func load_mg_dba(APImodule string) int {
-   libname := C.CString(APImodule)
+   var mod = syscall.NewLazyDLL(APImodule)
 
-   defer C.free(unsafe.Pointer(libname)) 
-   handle := C.dlopen(libname, C.RTLD_LAZY) 
+   pf_init = mod.NewProc("dbx_init")
+   pf_version = mod.NewProc("dbx_version")
+   pf_open = mod.NewProc("dbx_open")
+   pf_close = mod.NewProc("dbx_close")
+   pf_set = mod.NewProc("dbx_set")
+   pf_get = mod.NewProc("dbx_get")
+   pf_next = mod.NewProc("dbx_next")
+   pf_previous = mod.NewProc("dbx_previous")
+   pf_nextnode = mod.NewProc("dbx_nextnode")
+   pf_delete = mod.NewProc("dbx_delete")
+   pf_defined = mod.NewProc("dbx_defined")
+   pf_merge = mod.NewProc("dbx_merge")
+   pf_increment = mod.NewProc("dbx_increment")
+   pf_lock = mod.NewProc("dbx_lock")
+   pf_unlock = mod.NewProc("dbx_unlock")
+   pf_function = mod.NewProc("dbx_function")
+   pf_classmethod = mod.NewProc("dbx_classmethod")
+   pf_method = mod.NewProc("dbx_method")
+   pf_getproperty = mod.NewProc("dbx_getproperty")
+   pf_setproperty = mod.NewProc("dbx_setproperty")
+   pf_closeinstance = mod.NewProc("dbx_closeinstance")
+   pf_getnamespace = mod.NewProc("dbx_getnamespace")
+   pf_setnamespace = mod.NewProc("dbx_setnamespace")
+   pf_sleep = mod.NewProc("dbx_sleep")
+   pf_benchmark = mod.NewProc("dbx_benchmark")
 
-   pf_init = C.dlsym(handle, C.CString("dbx_init"))
-   pf_version = C.dlsym(handle, C.CString("dbx_version"))
-   pf_open = C.dlsym(handle, C.CString("dbx_open"))
-   pf_close = C.dlsym(handle, C.CString("dbx_close"))
-   pf_set = C.dlsym(handle, C.CString("dbx_set"))
-   pf_get = C.dlsym(handle, C.CString("dbx_get"))
-   pf_next = C.dlsym(handle, C.CString("dbx_next"))
-   pf_previous = C.dlsym(handle, C.CString("dbx_previous"))
-   pf_nextnode = C.dlsym(handle, C.CString("dbx_nextnode"))
-   pf_delete = C.dlsym(handle, C.CString("dbx_delete"))
-   pf_defined = C.dlsym(handle, C.CString("dbx_defined"))
-   pf_merge = C.dlsym(handle, C.CString("dbx_merge"))
-   pf_increment = C.dlsym(handle, C.CString("dbx_increment"))
-   pf_lock = C.dlsym(handle, C.CString("dbx_lock"))
-   pf_unlock = C.dlsym(handle, C.CString("dbx_unlock"))
-   pf_function = C.dlsym(handle, C.CString("dbx_function"))
-   pf_classmethod = C.dlsym(handle, C.CString("dbx_classmethod"))
-   pf_method = C.dlsym(handle, C.CString("dbx_method"))
-   pf_getproperty = C.dlsym(handle, C.CString("dbx_getproperty"))
-   pf_setproperty = C.dlsym(handle, C.CString("dbx_setproperty"))
-   pf_closeinstance = C.dlsym(handle, C.CString("dbx_closeinstance"))
-   pf_getnamespace = C.dlsym(handle, C.CString("dbx_getnamespace"))
-   pf_setnamespace = C.dlsym(handle, C.CString("dbx_setnamespace"))
-   pf_sleep = C.dlsym(handle, C.CString("dbx_sleep"))
-   pf_benchmark = C.dlsym(handle, C.CString("dbx_benchmark"))
-
-   C.c_dbx_init(pf_init)
+   _, _, _ = pf_init.Call()
 
    return 0;
 }
