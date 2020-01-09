@@ -1,22 +1,23 @@
-# mg_go
+# mg\_go
 
 A GO Extension for InterSystems **Cache/IRIS** and **YottaDB**.
 
 Chris Munt <cmunt@mgateway.com>  
-4 July 2019, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
+9 January 2020, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
 
 
-* Current Release: Version: 1.0; Revision 1 (10 July 2019)
+* Current Release: Version: 1.1; Revision 2 (9 January 2020)
+* [Release Notes](#RelNotes) can be found at the end of this document.
 
 ## Overview
 
-**mg_go** is an Open Source GO extension developed for InterSystems **Cache/IRIS** and the **YottaDB** database.  It will also work with the **GT.M**.
+**mg\_go** is an Open Source GO extension developed for InterSystems **Cache/IRIS** and the **YottaDB** database.  It will also work with the **GT.M** database.
 
-The **mg_go** extension connects to these databases using their high performance C-based APIs. 
+The **mg\_go** extension connects to these databases using their high performance C-based APIs. There is also the option of connecting to the database over the network.
 
 ## Pre-requisites
 
-GO installation:
+**Go** installation:
 
        https://golang.org/
 
@@ -25,9 +26,23 @@ InterSystems **Cache/IRIS** or **YottaDB** (or similar M database):
        https://www.intersystems.com/
        https://yottadb.com/
 
-## Installing mg_go
+## Installing mg\_go
 
-Install the core database interface module (**mg_dba.so** for UNIX and **mg_dba.dll** for Windows) in a directory of your choosing.
+Install the core database interface module (**mg\_dba.so** for UNIX and **mg\_dba.dll** for Windows) in a directory of your choosing.
+
+The **mg\_go** extension is a module written in **Go** and this is included in your Go project.  **mg\_go** dynamically loads the **mg\_dba** library (written in C) and this latter module is responsible for connecting **mg\_go** to the database either via the database's API or over the network.
+
+##### Building the mg_dba module from the source code provided
+
+UNIX (in the /src/ directory):
+
+       make
+
+Windows (in the /src/ directory):
+
+       nmake -f Makefile.win
+
+##### Installing the mg\_go extension
 
 Install the GO extension (essentially a GO package) in your GO source directory.
 
@@ -35,18 +50,122 @@ Install the GO extension (essentially a GO package) in your GO source directory.
 
 In this directory you will find **mg.go.unix** and **mg.go.windows**.  Rename the appropriate one for your OS as **mg.go**
 
-## Documentation
+### InterSystems Cache/IRIS
+
+Log in to the Manager UCI and install the **zmgsi** routines held in either **/m/zmgsi\_cache.xml** or **/m/zmgsi\_iris.xml** as appropriate.
+
+       do $system.OBJ.Load("/m/zmgsi_cache.xml","ck")
+
+Change to your development UCI and check the installation:
+
+       do ^%zmgsi
+
+       M/Gateway Developments Ltd - Service Integration Gateway
+       Version: 3.2; Revision 4 (8 January 2020)
+
+### YottaDB
+
+The instructions given here assume a standard 'out of the box' installation of **YottaDB** deployed in the following location:
+
+       /usr/local/lib/yottadb/r122
+
+The primary default location for routines:
+
+       /root/.yottadb/r1.22_x86_64/r
+
+Copy all the routines (i.e. all files with an 'm' extension) held in the GitHub **/yottadb** directory to:
+
+       /root/.yottadb/r1.22_x86_64/r
+
+Change directory to the following location and start a **YottaDB** command shell:
+
+       cd /usr/local/lib/yottadb/r122
+       ./ydb
+
+Link all the **zmgsi** routines and check the installation:
+
+       do ylink^%zmgsi
+
+       do ^%zmgsi
+
+       M/Gateway Developments Ltd - Service Integration Gateway
+       Version: 3.2; Revision 4 (8 January 2020)
+
+
+Note that the version of **zmgsi** is successfully displayed.
+
+
+## Setting up the network service (for network based connectivity only)
+
+The default TCP server port for **zmgsi** is **7041**.  If you wish to use an alternative port then modify the following instructions accordingly.
+
+### InterSystems Cache/IRIS
+
+Start the Cache/IRIS-hosted concurrent TCP service in the Manager UCI:
+
+       do start^%zmgsi(0) 
+
+To use a server TCP port other than 7041, specify it in the start-up command (as opposed to using zero to indicate the default port of 7041).
+
+### YottaDB
+
+Network connectivity to **YottaDB** is managed via the **xinetd** service.  First create the following launch script (called **zmgsi\_ydb** here):
+
+       /usr/local/lib/yottadb/r122/zmgsi_ydb
+
+Content:
+
+       #!/bin/bash
+       cd /usr/local/lib/yottadb/r122
+       export ydb_dir=/root/.yottadb
+       export ydb_dist=/usr/local/lib/yottadb/r122
+       export ydb_routines="/root/.yottadb/r1.22_x86_64/o*(/root/.yottadb/r1.22_x86_64/r /root/.yottadb/r) /usr/local/lib/yottadb/r122/libyottadbutil.so"
+       export ydb_gbldir="/root/.yottadb/r1.22_x86_64/g/yottadb.gld"
+       $ydb_dist/ydb -r xinetd^%zmgsis
+
+Create the **xinetd** script (called **zmgsi\_xinetd** here): 
+
+       /etc/xinetd.d/zmgsi_xinetd
+
+Content:
+
+       service zmgsi_xinetd
+       {
+            disable         = no
+            type            = UNLISTED
+            port            = 7041
+            socket_type     = stream
+            wait            = no
+            user            = root
+            server          = /usr/local/lib/yottadb/r122/zmgsi_ydb
+       }
+
+* Note: sample copies of **zmgsi\_xinetd** and **zmgsi\_ydb** are included in the **/unix** directory.
+
+Edit the services file:
+
+       /etc/services
+
+Add the following line to this file:
+
+       zmgsi_xinetd          7041/tcp                        # zmgsi
+
+Finally restart the **xinetd** service:
+
+       /etc/init.d/xinetd restart
+
+## Using mg_go
 
 ### Including the mg_go package in your project
 
-To use the **mg_go** extension you should include it in the list of packages required for your project.  For a  very basic GO project this might look something like:
+To use the **mg\_go** extension you should include it in the list of packages required for your project.  For a  very basic GO project this might look something like:
 
        import (
           "fmt"
           "mg_go"
        )
 
-### Open a connection to the database
+### Open a connection to the database (API based connectivity)
 
 In the following examples, modify all paths (and any user names and passwords) to match those of your own installation.
 
@@ -88,6 +207,36 @@ Assuming an 'out of the box' YottaDB installation under **/usr/local/lib/yottadb
            db.EnvVars = db.EnvVars + "ydb_ci=/usr/local/lib/yottadb/r122/cm.ci\n"
            db.EnvVars = db.EnvVars + "\n"
        result := db.Open()
+
+### Open a connection to the database (Network based connectivity)
+
+Assuming the server (**Cache** in this example) is listening on port **7041** on host **localhost**
+
+       db := mg_go.New("Cache")
+           db.APImodule = "../bin/mg_dba.so" // this will be mg_dba.dll for Windows
+           db.Host = "localhost"
+           db.TCPPort = 7041
+           db.Username = "_SYSTEM"
+           db.Password = "SYS"
+           db.Namespace = "USER"
+       result := db.Open()
+
+#### Connecting to the database via the MGWSI Service Integration Gateway
+
+If the M/Gateway Service Integration Gateway (**MGWSI**) is available, **mg\_go** can connect to the database via this facility.
+
+Assuming the **MGWSI** Gateway is listening on port **7040** on host **localhost** and the target Server (**Cache** in this example) is named as **LOCAL** in the Service integration Gateway configuration.
+
+       db := mg_go.New("Cache")
+           db.APImodule = "../bin/mg_dba.so" // this will be mg_dba.dll for Windows
+           db.Host = "localhost"
+           db.TCPPort = 7040
+           db.Server = "LOCAL"
+           db.Username = "_SYSTEM"
+           db.Password = "SYS"
+           db.Namespace = "USER"
+       result := db.Open()
+
 
 ### Invocation of database commands
 
@@ -159,6 +308,15 @@ Example:
        id = r.Data.(string)
           fmt.Printf("\nPerson ID: %s, Name: %s", id, person.Get(id).Data.(string))
        }
+
+#### Increment the value held in a global node
+
+       result := <global>.Increment(<key>)
+      
+Example (increment the ^Person global by 1 and return the next value):
+
+       result := person.Increment(1)
+
 
 ### Invocation of database functions
 
@@ -267,13 +425,13 @@ Example:
       result := customer.ClassMethod("MyMethod", 3)
 
 
-### Return the version of mg_go
+### Return the version of mg\_go
 
        version := db.Version()
 
 Example:
 
-       fmt.Printf("\nVersion of mg_go: %s\n",  db.Version())
+       fmt.Printf("\nVersion of mg\_go: %s\n",  db.Version())
 
 
 ### Close database connection
@@ -282,7 +440,7 @@ Example:
 
 ## License
 
-Copyright (c) 2018-2019 M/Gateway Developments Ltd,
+Copyright (c) 2018-2020 M/Gateway Developments Ltd,
 Surrey UK.                                                      
 All rights reserved.
  
@@ -296,3 +454,12 @@ Licensed under the Apache License, Version 2.0 (the "License"); you may not use 
 
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.      
 
+## <a name="RelNotes"></a>Release Notes
+
+### v1.0.1 (4 July 2019)
+
+* Initial Release
+
+### v1.1.2 (9 January 2020)
+
+* Indroduce the option of connecting to the M server over the network.
