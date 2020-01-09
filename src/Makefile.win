@@ -1,0 +1,43 @@
+# Microsoft Windows makefile for mg_dba module (mg_dba.dll)
+#
+# Build:
+# nmake -f Makefile.win
+#
+# Cleanup:
+# nmake -f Makefile.win clean
+#
+# Install:
+# nmake -f Makefile.win install
+
+
+# Microsoft C Compiler
+CC=cl.exe
+
+# Microsoft linker
+LINK=link.exe
+
+# Build mg_dba module
+all : app
+
+# Link the object file and dependent libraries into a binary
+app : mg_dba.obj
+   $(LINK) /OUT:mg_dba.dll mg_dba.obj /MANIFEST /NXCOMPAT /PDB:"mg_dba.pdb" /DYNAMICBASE \
+           "kernel32.lib" "user32.lib" \
+           /IMPLIB:"mg_dba.lib" /DLL /MACHINE:X64 /INCREMENTAL:NO /SUBSYSTEM:WINDOWS \
+           /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /ERRORREPORT:PROMPT /NOLOGO \
+           /TLBID:1
+
+# Compile the source file into object file
+mg_dba.obj : mg_dba.c
+   $(CC) /Fomg_dba.obj /GS /W3 /Gy /Zc:wchar_t /Zi /Gm- /O2 /Ob1 /fp:precise \
+         /D "WIN32" /D "NDEBUG" /D "_WINDOWS" /D "_VC80_UPGRADE=0x0710" /D "_WINDLL" /errorReport:prompt \
+         /GF /WX- /Zc:forScope /Gd /MD /FC /EHsc /c mg_dba.c
+
+# Install mg_dba module
+install :
+   rem copy mg_dba.dll c:\windows\system32\
+
+# Clean target
+clean :
+   del mg_dba.dll mg_dba.dll.manifest mg_dba.obj mg_dba.pdb mg_dba.lib mg_dba.exp vc*.pdb
+
