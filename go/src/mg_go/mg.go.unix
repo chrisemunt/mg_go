@@ -5,7 +5,7 @@
    | Description: An Interface to InterSystems Cache/IRIS and YottaDB         |
    | Author:      Chris Munt cmunt@mgateway.com                               |
    |                         chris.e.munt@gmail.com                           |
-   | Copyright (c) 2017-2019 M/Gateway Developments Ltd,                      |
+   | Copyright (c) 2017-2020 M/Gateway Developments Ltd,                      |
    | Surrey UK.                                                               |
    | All rights reserved.                                                     |
    |                                                                          |
@@ -24,6 +24,17 @@
    | limitations under the License.                                           |      
    |                                                                          |
    ----------------------------------------------------------------------------
+*/
+
+/*
+   Development Diary (in brief):
+
+Version 1.0.1 3 July 2019:
+   First release.
+
+Version 1.1.2 8 January 2020:
+   Network based connectivity option.
+
 */
 
 package mg_go
@@ -52,12 +63,12 @@ import "C"
 import (
 	"fmt"
 	"unsafe"
-   "strconv"
+    "strconv"
 )
 
 const DBX_VERSION_MAJOR    int = 1
-const DBX_VERSION_MINOR    int = 0
-const DBX_VERSION_BUILD    int = 1
+const DBX_VERSION_MINOR    int = 1
+const DBX_VERSION_BUILD    int = 2
 
 const DBX_DSORT_INVALID    byte = 0
 const DBX_DSORT_DATA       byte = 1
@@ -77,6 +88,27 @@ const DBX_DTYPE_DOUBLE     byte = 6
 const DBX_DTYPE_OREF       byte = 7
 const DBX_DTYPE_NULL       byte = 10
 
+const DBX_CMND_OPEN        byte = 1
+const DBX_CMND_CLOSE       byte = 2
+const DBX_CMND_NSGET       byte = 3
+const DBX_CMND_NSSET       byte = 4
+
+const DBX_CMND_GSET        byte = 11
+const DBX_CMND_GGET        byte = 12
+const DBX_CMND_GNEXT       byte = 13
+const DBX_CMND_GPREVIOUS   byte = 14
+const DBX_CMND_GDELETE     byte = 15
+const DBX_CMND_GDEFINED    byte = 16
+const DBX_CMND_GINCREMENT  byte = 17
+
+const DBX_CMND_FUNCTION    byte = 31
+
+const DBX_CMND_CCMETH      byte = 41
+const DBX_CMND_CGETP       byte = 42
+const DBX_CMND_CSETP       byte = 43
+const DBX_CMND_CMETH       byte = 44
+
+
 const DBX_INPUT_BUFFER_SIZE   int = 32768
 const DBX_OUTPUT_BUFFER_SIZE  int = 32768
 
@@ -85,6 +117,10 @@ type Database struct {
    Type string
    APImodule string
    Path string
+   Host string
+   TCPPort int
+   Server string
+   ServerSoftware string
    Username string
    Password string
    Namespace string
@@ -155,7 +191,15 @@ func New(Type string) Database {
 
    db.Type = Type
    db.index = 0
+   db.Path = ""
+   db.Host = ""
+   db.Server = ""
+   db.ServerSoftware = ""
+   db.Username = ""
+   db.Password = ""
+   db.Namespace = ""
    db.EnvVars = ""
+   db.TCPPort = 0;
 
    db.InputBufferSize = DBX_INPUT_BUFFER_SIZE
    db.OutputBufferSize = DBX_OUTPUT_BUFFER_SIZE
@@ -202,6 +246,8 @@ func (db *Database) Open() Result {
 
    block_add_string(db.inputbuffer[:], &buffer_len, db.Type, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.Path, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
+   block_add_string(db.inputbuffer[:], &buffer_len, db.Host, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
+   block_add_string(db.inputbuffer[:], &buffer_len, strconv.Itoa(db.TCPPort), 0, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_string(db.inputbuffer[:], &buffer_len, db.Username, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.Password, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.Namespace, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
@@ -209,7 +255,10 @@ func (db *Database) Open() Result {
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.Debug, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.EnvVars, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
+   block_add_string(db.inputbuffer[:], &buffer_len, db.Server, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
+   block_add_string(db.inputbuffer[:], &buffer_len, db.ServerSoftware, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_OPEN)
 
    C.c_dbx_generic(pf_open, unsafe.Pointer(db.Cinputbuffer), nil)
 
@@ -229,7 +278,7 @@ func (db *Database) Close() Result {
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(db.inputbuffer[:], buffer_len)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_CLOSE)
 
    C.c_dbx_generic(pf_close, unsafe.Pointer(db.Cinputbuffer), nil)
 
@@ -249,7 +298,7 @@ func (db *Database) GetNamespace() Result {
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(db.inputbuffer[:], buffer_len)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_NSGET)
 
    C.c_dbx_generic(pf_getnamespace, unsafe.Pointer(db.Cinputbuffer), nil)
 
@@ -270,7 +319,7 @@ func (db *Database) SetNamespace(Namespace string) Result {
 
    block_add_string(db.inputbuffer[:], &buffer_len, Namespace, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(db.inputbuffer[:], buffer_len)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_NSSET)
 
    C.c_dbx_generic(pf_setnamespace, unsafe.Pointer(db.Cinputbuffer), nil)
 
@@ -316,9 +365,9 @@ func (g *Global) Set(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(g.db.inputbuffer[:], buffer_len)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GSET)
 
    C.c_dbx_generic(pf_set, unsafe.Pointer(g.db.Cinputbuffer), nil)
 
@@ -334,9 +383,9 @@ func (g *Global) Get(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(g.db.inputbuffer[:], buffer_len)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GGET)
 
    C.c_dbx_generic(pf_get, unsafe.Pointer(g.db.Cinputbuffer), nil)
 
@@ -351,9 +400,9 @@ func (g *Global) Next(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(g.db.inputbuffer[:], buffer_len)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GNEXT)
 
    C.c_dbx_generic(pf_next, unsafe.Pointer(g.db.Cinputbuffer), nil)
 
@@ -375,9 +424,9 @@ func (g *Global) Previous(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(g.db.inputbuffer[:], buffer_len)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GPREVIOUS)
 
    C.c_dbx_generic(pf_previous, unsafe.Pointer(g.db.Cinputbuffer), nil)
 
@@ -399,9 +448,9 @@ func (g *Global) Delete(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(g.db.inputbuffer[:], buffer_len)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GDELETE)
 
    C.c_dbx_generic(pf_delete, unsafe.Pointer(g.db.Cinputbuffer), nil)
 
@@ -417,11 +466,29 @@ func (g *Global) Defined(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(g.db.inputbuffer[:], buffer_len)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GDEFINED)
 
    C.c_dbx_generic(pf_defined, unsafe.Pointer(g.db.Cinputbuffer), nil)
+
+   res := get_result(g.db.inputbuffer)
+
+   return res
+}
+
+
+// Increment a global node
+func (g *Global) Increment(args ... interface{}) Result {
+   buffer_len := g.Reference()
+
+   for _, x := range args {
+      block_add_item(g.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
+   }
+   block_add_string(g.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
+   add_head(g.db.inputbuffer[:], buffer_len, DBX_CMND_GINCREMENT)
+
+   C.c_dbx_generic(pf_increment, unsafe.Pointer(g.db.Cinputbuffer), nil)
 
    res := get_result(g.db.inputbuffer)
 
@@ -439,10 +506,10 @@ func (db *Database) Function(args ... interface{}) Result {
 
    for _, x := range args {
       block_add_item(db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
 
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(db.inputbuffer[:], buffer_len)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_FUNCTION)
 
    C.c_dbx_generic(pf_function, unsafe.Pointer(db.Cinputbuffer), nil)
 
@@ -458,7 +525,8 @@ func (db *Database) Class(Name string) Class {
    c := new(Class)
    c.db = db
    c.Name = Name
- 
+   c.oref = -1
+
    return *c;
 }
 
@@ -483,15 +551,19 @@ func (c *Class) ClassMethod(method string, args ... interface{}) Result {
    block_add_item(c.db.inputbuffer[:], &buffer_len, method, 0, DBX_DSORT_DATA)
    for _, x := range args {
       block_add_item(c.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(c.db.inputbuffer[:], buffer_len)
+   add_head(c.db.inputbuffer[:], buffer_len, DBX_CMND_CCMETH)
 
    C.c_dbx_generic(pf_classmethod, unsafe.Pointer(c.db.Cinputbuffer), nil)
 
    res := get_result(c.db.inputbuffer)
 
-   c.oref, _ = strconv.Atoi(res.Data.(string))
+   if (res.DataType == DBX_DTYPE_OREF) {
+      c.oref, _ = strconv.Atoi(res.Data.(string))
+   } else {
+      c.oref = -1
+   }
 
    return res
 }
@@ -499,12 +571,22 @@ func (c *Class) ClassMethod(method string, args ... interface{}) Result {
 
 // Get a property value for an instantiated database object class
 func (c *Class) GetProperty(name string) Result {
+
+   if (c.oref == -1) {
+      res := new(Result)
+	  res.Data = ""
+      res.ErrorMessage = "No Object"
+      res.ErrorCode = 1
+      res.OK = false
+	  return *res
+   }
+
    buffer_len := c.Reference()
 
    block_add_item(c.db.inputbuffer[:], &buffer_len, c.oref, 0, DBX_DSORT_DATA)
    block_add_item(c.db.inputbuffer[:], &buffer_len, name, 0, DBX_DSORT_DATA)
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(c.db.inputbuffer[:], buffer_len)
+   add_head(c.db.inputbuffer[:], buffer_len, DBX_CMND_CGETP)
 
    C.c_dbx_generic(pf_getproperty, unsafe.Pointer(c.db.Cinputbuffer), nil)
 
@@ -516,13 +598,23 @@ func (c *Class) GetProperty(name string) Result {
 
 // Set a property value for an instantiated database object class
 func (c *Class) SetProperty(name string, value interface{}) Result {
+
+   if (c.oref == -1) {
+      res := new(Result)
+	  res.Data = ""
+      res.ErrorMessage = "No Object"
+      res.ErrorCode = 1
+      res.OK = false
+	  return *res
+   }
+
    buffer_len := c.Reference()
 
    block_add_item(c.db.inputbuffer[:], &buffer_len, c.oref, 0, DBX_DSORT_DATA)
    block_add_item(c.db.inputbuffer[:], &buffer_len, name, 0, DBX_DSORT_DATA)
    block_add_item(c.db.inputbuffer[:], &buffer_len, value, 0, DBX_DSORT_DATA)
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(c.db.inputbuffer[:], buffer_len)
+   add_head(c.db.inputbuffer[:], buffer_len, DBX_CMND_CSETP)
 
    C.c_dbx_generic(pf_setproperty, unsafe.Pointer(c.db.Cinputbuffer), nil)
 
@@ -534,15 +626,25 @@ func (c *Class) SetProperty(name string, value interface{}) Result {
 
 // Invoke a method for an instantiated database object class
 func (c *Class) Method(method string, args ... interface{}) Result {
+
+   if (c.oref == -1) {
+      res := new(Result)
+	  res.Data = ""
+      res.ErrorMessage = "No Object"
+      res.ErrorCode = 1
+      res.OK = false
+	  return *res
+   }
+
    buffer_len := c.Reference()
 
    block_add_item(c.db.inputbuffer[:], &buffer_len, c.oref, 0, DBX_DSORT_DATA)
    block_add_item(c.db.inputbuffer[:], &buffer_len, method, 0, DBX_DSORT_DATA)
    for _, x := range args {
       block_add_item(c.db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
-	}
+   }
    block_add_string(c.db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
-   add_size(c.db.inputbuffer[:], buffer_len)
+   add_head(c.db.inputbuffer[:], buffer_len, DBX_CMND_CMETH)
 
    C.c_dbx_generic(pf_method, unsafe.Pointer(c.db.Cinputbuffer), nil)
 
@@ -633,11 +735,12 @@ func block_add_size(buffer []byte, buffer_len *int, data_len int, data_sort byte
 }
 
 
-func add_size(buffer []byte, data_len int) int {
+func add_head(buffer []byte, data_len int, cmnd byte) int {
    buffer[0] = (byte) (data_len >> 0)
    buffer[1] = (byte) (data_len >> 8)
    buffer[2] = (byte) (data_len >> 16)
    buffer[3] = (byte) (data_len >> 24)
+   buffer[4] = cmnd
    return 0
 }
 
