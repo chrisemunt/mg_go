@@ -3,19 +3,32 @@
 A GO Extension for InterSystems **Cache/IRIS** and **YottaDB**.
 
 Chris Munt <cmunt@mgateway.com>  
-9 January 2020, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
+11 January 2021, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
 
 
-* Current Release: Version: 1.1; Revision 2 (9 January 2020)
+* Current Release: Version: 1.1; Revision 2a (11 January 2021).
+* Two connectivity models to the InterSystems or YottaDB database are provided: High performance via the local database API or network based.
 * [Release Notes](#RelNotes) can be found at the end of this document.
 
-## Overview
+Contents
+
+* [Overview](#Overview") 
+* [Pre-requisites](#PreReq") 
+* [Installing mg\_go](#Install)
+* [Connecting to the database](#Connect)
+* [Invocation of database commands](#DBCommands)
+* [Invocation of database functions](#DBFunctions)
+* [Direct access to InterSystems classes (IRIS and Cache)](#DBClasses)
+* [License](#License)
+
+
+## <a name="Overview"></a> Overview 
 
 **mg\_go** is an Open Source GO extension developed for InterSystems **Cache/IRIS** and the **YottaDB** database.  It will also work with the **GT.M** database.
 
 The **mg\_go** extension connects to these databases using their high performance C-based APIs. There is also the option of connecting to the database over the network.
 
-## Pre-requisites
+## <a name="PreReq"></a> Pre-requisites 
 
 **Go** installation:
 
@@ -26,13 +39,13 @@ InterSystems **Cache/IRIS** or **YottaDB** (or similar M database):
        https://www.intersystems.com/
        https://yottadb.com/
 
-## Installing mg\_go
+## <a name="Install"></a> Installing mg\_go
 
 Install the core database interface module (**mg\_dba.so** for UNIX and **mg\_dba.dll** for Windows) in a directory of your choosing.
 
 The **mg\_go** extension is a module written in **Go** and this is included in your Go project.  **mg\_go** dynamically loads the **mg\_dba** library (written in C) and this latter module is responsible for connecting **mg\_go** to the database either via the database's API or over the network.
 
-##### Building the mg_dba module from the source code provided
+### Building the mg_dba module from the source code provided
 
 UNIX (in the /src/ directory):
 
@@ -42,7 +55,7 @@ Windows (in the /src/ directory):
 
        nmake -f Makefile.win
 
-##### Installing the mg\_go extension
+### Installing the mg\_go extension
 
 Install the GO extension (essentially a GO package) in your GO source directory.
 
@@ -50,36 +63,45 @@ Install the GO extension (essentially a GO package) in your GO source directory.
 
 In this directory you will find **mg.go.unix** and **mg.go.windows**.  Rename the appropriate one for your OS as **mg.go**
 
-### InterSystems Cache/IRIS
+### Installing the M support routines
 
-Log in to the Manager UCI and install the **zmgsi** routines held in either **/m/zmgsi\_cache.xml** or **/m/zmgsi\_iris.xml** as appropriate.
+The M support routines are required for:
 
-       do $system.OBJ.Load("/m/zmgsi_cache.xml","ck")
+* Network based access to databases.
+
+Two M routines need to be installed (%zmgsi and %zmgsis).  These can be found in the *Service Integration Gateway* (**mgsi**) GitHub source code repository ([https://github.com/chrisemunt/mgsi](https://github.com/chrisemunt/mgsi)).  Note that it is not necessary to install the whole *Service Integration Gateway*, just the two M routines held in that repository.
+
+#### Installation for InterSystems Cache/IRIS
+
+Log in to the %SYS Namespace and install the **zmgsi** routines held in **/isc/zmgsi\_isc.ro**.
+
+       do $system.OBJ.Load("/isc/zmgsi_isc.ro","ck")
 
 Change to your development UCI and check the installation:
 
        do ^%zmgsi
 
        M/Gateway Developments Ltd - Service Integration Gateway
-       Version: 3.2; Revision 4 (8 January 2020)
+       Version: 3.6; Revision 15 (6 November 2020)
 
-### YottaDB
 
-The instructions given here assume a standard 'out of the box' installation of **YottaDB** deployed in the following location:
+#### Installation for YottaDB
 
-       /usr/local/lib/yottadb/r122
+The instructions given here assume a standard 'out of the box' installation of **YottaDB** (version 1.30) deployed in the following location:
+
+       /usr/local/lib/yottadb/r130
 
 The primary default location for routines:
 
-       /root/.yottadb/r1.22_x86_64/r
+       /root/.yottadb/r1.30_x86_64/r
 
 Copy all the routines (i.e. all files with an 'm' extension) held in the GitHub **/yottadb** directory to:
 
-       /root/.yottadb/r1.22_x86_64/r
+       /root/.yottadb/r1.30_x86_64/r
 
 Change directory to the following location and start a **YottaDB** command shell:
 
-       cd /usr/local/lib/yottadb/r122
+       cd /usr/local/lib/yottadb/r130
        ./ydb
 
 Link all the **zmgsi** routines and check the installation:
@@ -89,17 +111,16 @@ Link all the **zmgsi** routines and check the installation:
        do ^%zmgsi
 
        M/Gateway Developments Ltd - Service Integration Gateway
-       Version: 3.2; Revision 4 (8 January 2020)
-
+       Version: 3.6; Revision 15 (6 November 2020)
 
 Note that the version of **zmgsi** is successfully displayed.
 
 
-## Setting up the network service (for network based connectivity only)
+### Setting up the network service (for network based connectivity only)
 
 The default TCP server port for **zmgsi** is **7041**.  If you wish to use an alternative port then modify the following instructions accordingly.
 
-### InterSystems Cache/IRIS
+#### InterSystems Cache/IRIS
 
 Start the Cache/IRIS-hosted concurrent TCP service in the Manager UCI:
 
@@ -107,21 +128,25 @@ Start the Cache/IRIS-hosted concurrent TCP service in the Manager UCI:
 
 To use a server TCP port other than 7041, specify it in the start-up command (as opposed to using zero to indicate the default port of 7041).
 
-### YottaDB
+#### YottaDB
 
 Network connectivity to **YottaDB** is managed via the **xinetd** service.  First create the following launch script (called **zmgsi\_ydb** here):
 
-       /usr/local/lib/yottadb/r122/zmgsi_ydb
+       /usr/local/lib/yottadb/r130/zmgsi_ydb
 
 Content:
 
        #!/bin/bash
-       cd /usr/local/lib/yottadb/r122
+       cd /usr/local/lib/yottadb/r130
        export ydb_dir=/root/.yottadb
-       export ydb_dist=/usr/local/lib/yottadb/r122
-       export ydb_routines="/root/.yottadb/r1.22_x86_64/o*(/root/.yottadb/r1.22_x86_64/r /root/.yottadb/r) /usr/local/lib/yottadb/r122/libyottadbutil.so"
-       export ydb_gbldir="/root/.yottadb/r1.22_x86_64/g/yottadb.gld"
+       export ydb_dist=/usr/local/lib/yottadb/r130
+       export ydb_routines="/root/.yottadb/r1.30_x86_64/o*(/root/.yottadb/r1.30_x86_64/r /root/.yottadb/r) /usr/local/lib/yottadb/r130/libyottadbutil.so"
+       export ydb_gbldir="/root/.yottadb/r1.30_x86_64/g/yottadb.gld"
        $ydb_dist/ydb -r xinetd^%zmgsis
+
+Note that you should, if necessary, modify the permissions on this file so that it is executable.  For example:
+
+       chmod a=rx /usr/local/lib/yottadb/r130/zmgsi_ydb
 
 Create the **xinetd** script (called **zmgsi\_xinetd** here): 
 
@@ -137,10 +162,10 @@ Content:
             socket_type     = stream
             wait            = no
             user            = root
-            server          = /usr/local/lib/yottadb/r122/zmgsi_ydb
+            server          = /usr/local/lib/yottadb/r130/zmgsi_ydb
        }
 
-* Note: sample copies of **zmgsi\_xinetd** and **zmgsi\_ydb** are included in the **/unix** directory.
+* Note: sample copies of **zmgsi\_xinetd** and **zmgsi\_ydb** are included in the **/unix** directory of the **mgsi** GitHub repository [here](https://github.com/chrisemunt/mgsi).
 
 Edit the services file:
 
@@ -154,7 +179,8 @@ Finally restart the **xinetd** service:
 
        /etc/init.d/xinetd restart
 
-## Using mg_go
+
+## <a name="Connect"></a> Connecting to the database
 
 ### Including the mg_go package in your project
 
@@ -195,16 +221,16 @@ Assuming IRIS is installed under **/opt/IRIS20181/**
 
 #### YottaDB
 
-Assuming an 'out of the box' YottaDB installation under **/usr/local/lib/yottadb/r122**.
+Assuming an 'out of the box' YottaDB installation under **/usr/local/lib/yottadb/r130**.
 
        db := mg_go.New("YottaDB")
            db.APImodule = "../bin/mg_dba.so"
-           db.Path = "/usr/local/lib/yottadb/r122"
+           db.Path = "/usr/local/lib/yottadb/r130"
            db.EnvVars = db.EnvVars + "ydb_dir=/root/.yottadb\n"
-           db.EnvVars = db.EnvVars + "ydb_rel=r1.22_x86_64\n"
-           db.EnvVars = db.EnvVars + "ydb_gbldir=/root/.yottadb/r1.22_x86_64/g/yottadb.gld\n"
-           db.EnvVars = db.EnvVars + "ydb_routines=/root/.yottadb/r1.22_x86_64/o*(/root/.yottadb/r1.22_x86_64/r /root/.yottadb/r) /usr/local/lib/yottadb/r122/libyottadbutil.so\n"
-           db.EnvVars = db.EnvVars + "ydb_ci=/usr/local/lib/yottadb/r122/cm.ci\n"
+           db.EnvVars = db.EnvVars + "ydb_rel=r1.30_x86_64\n"
+           db.EnvVars = db.EnvVars + "ydb_gbldir=/root/.yottadb/r1.30_x86_64/g/yottadb.gld\n"
+           db.EnvVars = db.EnvVars + "ydb_routines=/root/.yottadb/r1.30_x86_64/o*(/root/.yottadb/r1.30_x86_64/r /root/.yottadb/r) /usr/local/lib/yottadb/r130/libyottadbutil.so\n"
+           db.EnvVars = db.EnvVars + "ydb_ci=/usr/local/lib/yottadb/r130/cm.ci\n"
            db.EnvVars = db.EnvVars + "\n"
        result := db.Open()
 
@@ -238,9 +264,42 @@ Assuming the **MGWSI** Gateway is listening on port **7040** on host **localhost
        result := db.Open()
 
 
-### Invocation of database commands
+### Return the version of mg\_go
 
-#### Register a global name
+       version := db.Version()
+
+Example:
+
+       fmt.Printf("\nVersion of mg\_go: %s\n",  db.Version())
+
+
+### Get current Namespace
+
+      namespace := db.GetNamespace()
+
+Example:
+
+      namespace := db.GetNamespace()
+      fmt.Printf("\nCurrent Namespace ns=%v\n", namespace)
+
+
+### Change current Namespace
+
+      result := db.SetNamespace(<namespace>)
+
+Example:
+
+      result := db.SetNamespace("USER")
+
+
+### Close database connection
+
+       db.Close()
+
+
+## <a name="DBCommands"></a> Invocation of database commands
+
+### Register a global name
 
        global := db.Global(<global_name>)
 
@@ -248,7 +307,7 @@ Example (using a global named "Person"):
 
        person := db.Global("Person")
 
-#### Set a record
+### Set a record
 
        result := <global>.Set(<key>, <data>)
       
@@ -256,7 +315,7 @@ Example:
 
        person.Set(1, "John Smith")
 
-#### Get a record
+### Get a record
 
        result := <global>.Get(<key>)
       
@@ -265,7 +324,7 @@ Example:
        result := person.Get(1);
        fmt.Printf("\nName :  %s\n", result.Data.(string))
 
-#### Delete a record
+### Delete a record
 
        result := <global>.Delete(<key>)
       
@@ -274,7 +333,7 @@ Example:
        result := person.Delete(1)
 
 
-#### Check whether a record is defined
+### Check whether a record is defined
 
        result := <global>.Defined(<key>)
       
@@ -283,7 +342,7 @@ Example:
        result := person.Defined(1)
 
 
-#### Parse a set of records (in order)
+### Parse a set of records (in order)
 
        result := <global>.Next(<key>)
       
@@ -296,7 +355,7 @@ Example:
         }
 
 
-#### Parse a set of records (in reverse order)
+### Parse a set of records (in reverse order)
 
        result := <global>.Previous(<key>)
 
@@ -309,7 +368,7 @@ Example:
           fmt.Printf("\nPerson ID: %s, Name: %s", id, person.Get(id).Data.(string))
        }
 
-#### Increment the value held in a global node
+### Increment the value held in a global node
 
        result := <global>.Increment(<key>)
       
@@ -318,7 +377,7 @@ Example (increment the ^Person global by 1 and return the next value):
        result := person.Increment(1)
 
 
-### Invocation of database functions
+## <a name="DBFunctions"> Invocation of database functions
 
        result := db.Function(<function>, <arguments>)
       
@@ -335,26 +394,7 @@ Go invocation:
       fmt.Printf("\nFunction result: %v\n", fr)
 
 
-### Methods only available with InterSystems Cache and IRIS
-
-#### Get current Namespace
-
-      namespace := db.GetNamespace()
-
-Example:
-
-      namespace := db.GetNamespace()
-      fmt.Printf("\nCurrent Namespace ns=%v\n", namespace)
-
-#### Change current Namespace
-
-      result := db.SetNamespace(<namespace>)
-
-Example:
-
-      result := db.SetNamespace("USER")
-
-#### Access to Cache/IRIS Classes
+## <a name="DBClasses"> Direct access to InterSystems classes (IRIS and Cache)
 
 To illustrate these methods, the following simple class will be used:
 
@@ -374,7 +414,7 @@ To illustrate these methods, the following simple class will be used:
          }
       }
 
-##### Register a Cache/IRIS class
+### Register a Cache/IRIS class
 
       class := db.Class(<class_name>)
 
@@ -382,7 +422,7 @@ Example:
 
       customer := db.Class("User.customer")
 
-##### Invoke a ClassMethod
+### Invoke a ClassMethod
 
      result := <class>.ClassMethod(<classmethod_name>, <arguments>)
 
@@ -390,13 +430,13 @@ Example:
 
       result := customer.ClassMethod("MyClassMethod", 3)
 
-##### Open a specific instance of a Class
+### Open a specific instance of a Class
 
 Example (using instance/record #1):
 
      result := customer.ClassMethod("%OpenId", "1")
 
-##### Get a property
+### Get a property
 
      result := <class>.GetProperty(<property_name>)
 
@@ -407,7 +447,7 @@ Example:
 
       result := customer.ClassMethod("MyClassMethod", 3)
 
-##### Set a property
+### Set a property
 
      result := <class>.SetProperty(<property_name>, <value>)
 
@@ -416,7 +456,7 @@ Example:
      result = customer.SetProperty("name", "John Smith")
 
 
-##### Invoke a Method
+### Invoke a Method
 
      result := <class>.Method(<method_name>, <arguments>)
 
@@ -425,22 +465,9 @@ Example:
       result := customer.ClassMethod("MyMethod", 3)
 
 
-### Return the version of mg\_go
+## <a name="License"></a> License
 
-       version := db.Version()
-
-Example:
-
-       fmt.Printf("\nVersion of mg\_go: %s\n",  db.Version())
-
-
-### Close database connection
-
-       db.Close()
-
-## License
-
-Copyright (c) 2018-2020 M/Gateway Developments Ltd,
+Copyright (c) 2018-2021 M/Gateway Developments Ltd,
 Surrey UK.                                                      
 All rights reserved.
  
@@ -454,6 +481,7 @@ Licensed under the Apache License, Version 2.0 (the "License"); you may not use 
 
 Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.      
 
+
 ## <a name="RelNotes"></a>Release Notes
 
 ### v1.0.1 (4 July 2019)
@@ -463,3 +491,8 @@ Unless required by applicable law or agreed to in writing, software distributed 
 ### v1.1.2 (9 January 2020)
 
 * Indroduce the option of connecting to the M server over the network.
+
+### v1.1.2a (11 January 2021)
+
+* Verify that **mg\_go** works with the latest version of Go: 1.15.6
+* Restructure the documentation.
