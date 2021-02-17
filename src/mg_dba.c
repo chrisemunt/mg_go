@@ -5,7 +5,7 @@
    |              and YottaDB API                                             |
    | Author:      Chris Munt cmunt@mgateway.com                               |
    |                         chris.e.munt@gmail.com                           |
-   | Copyright (c) 2017-2020 M/Gateway Developments Ltd,                      |
+   | Copyright (c) 2017-2021 M/Gateway Developments Ltd,                      |
    | Surrey UK.                                                               |
    | All rights reserved.                                                     |
    |                                                                          |
@@ -45,6 +45,19 @@ Version 1.1.5 8 January 2020:
    Add compatibility shim layer for the old MGWSI protocols.
    Provide an embedded option to allow this code to be used for mg_python et al.
 
+Version 1.1.6 17 January 2020:
+   Introduce option in the old %ZMGWSIS protocol to connecto the database via its C API
+   - Interface function: ifc^%zmgsis(context, request, parameters) and IFC^%ZMGWSIS(context, request, parameters)
+
+Version 1.1.7 10 February 2020:
+   Add a universal event log facility.  Remove the old interactive 'debug' facility.
+
+Version 1.2.8 15 February 2021:
+   Introduce support for M transaction processing: tstart, $tlevel, tcommit, trollback.
+   Correct a fault that occasionally led to failures when returning long strings to Node.js from the DB Server.
+	- This fault only affected network based connectivity to the DB Server.
+   Allow a DB Server response timeout to be set for network based connectivity.
+
 */
 
 
@@ -58,9 +71,9 @@ extern int errno;
 static NETXSOCK      netx_so        = {0, 0, 0, 0, 0, 0, 0, {'\0'}};
 static DBXCON *      connection[DBX_MAXCONS];
 
-#if defined(MG_GTM)
-MGGTM                mg_gtm         = {0, 0, 0, 0, 0, 0, 0};
-#endif
+MG_MALLOC            dbx_ext_malloc = NULL;
+MG_REALLOC           dbx_ext_realloc = NULL;
+MG_FREE              dbx_ext_free = NULL;
 
 #if defined(_WIN32)
 CRITICAL_SECTION  dbx_global_mutex;
@@ -69,29 +82,25 @@ pthread_mutex_t   dbx_global_mutex  = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 
-#if !defined(MG_DBA_EMBEDDED)
-
-#if defined(_WIN32)
+#if defined(_WIN32) && defined(MG_DBA_DSO)
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved)
 {
    switch (fdwReason)
    { 
       case DLL_PROCESS_ATTACH:
-         InitializeCriticalSection(&dbx_global_mutex);
+         mg_init_critical_section((void *) &dbx_global_mutex);
          break;
       case DLL_THREAD_ATTACH:
          break;
       case DLL_THREAD_DETACH:
          break;
       case DLL_PROCESS_DETACH:
-         DeleteCriticalSection(&dbx_global_mutex);
+         mg_delete_critical_section((void *) &dbx_global_mutex);
          break;
    }
    return TRUE;
 }
-#endif
-
-#endif /* #if !defined(MG_DBA_EMBEDDED) */
+#endif /* #if defined(_WIN32) && defined(MG_DBA_DSO) */
 
 
 DBX_EXTFUN(int) dbx_init()
@@ -138,7 +147,7 @@ DBX_EXTFUN(int) dbx_version(int index, char *output, int output_len)
 DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
 {
    int rc, n, chndle, len, error_code;
-   char buffer[1024];
+   char buffer[1024], nstr[64];
    DBXCON *pcon;
    char *p, *p1, *p2;
 
@@ -171,13 +180,12 @@ DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
    pcon->p_isc_so = NULL;
    pcon->p_ydb_so = NULL;
    pcon->p_srv = NULL;
-   pcon->p_debug = &pcon->debug;
+   pcon->p_log = &pcon->log;
    pcon->p_db_mutex = &pcon->db_mutex;
    mg_mutex_create(pcon->p_db_mutex);
    pcon->p_zv = &pcon->zv;
 
-   pcon->p_debug->debug = 0;
-   pcon->p_debug->p_fdebug = stdout;
+   mg_log_init(pcon->p_log);
 
    pcon->input_str.len_used = 0;
 
@@ -198,10 +206,6 @@ DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
    printf("\ndbx_open : pcon->p_ydb_so->loaded=%d;\n", pcon->p_ydb_so->loaded);
 */
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_open");
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    pcon->pid = 0;
 
@@ -211,6 +215,7 @@ DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
    pcon->shdir[0] = '\0';
    pcon->ip_address[0] = '\0';
    pcon->port = 0;
+   pcon->timeout = NETX_TIMEOUT;
 
    for (n = 0; n < pcon->argc; n ++) {
 
@@ -276,7 +281,7 @@ DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
             len = (len < 60) ? len : 60;
             strncpy(pcon->debug_str, p, len);
             if (len) {
-               pcon->p_debug->debug = 1;
+               pcon->p_log->log_errors = 1;
             }
             break;
          case 10:
@@ -294,6 +299,16 @@ DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
             pcon->server_software[len] = '\0';
             mg_lcase(pcon->server_software);
             break;
+         case 13:
+            len = (len < 32) ? len : 32;
+            strncpy(nstr, p, len);
+            nstr[len] = '\0';
+            pcon->timeout = (int) strtol(nstr, NULL, 10);
+            if (pcon->timeout < 1) {
+               pcon->timeout = NETX_TIMEOUT;
+            }
+            break;
+
          default:
             break;
       }
@@ -334,7 +349,7 @@ DBX_EXTFUN(int) dbx_open(unsigned char *input, unsigned char *output)
          ((MGSRV *) pcon->p_srv)->mem_error = 0;
          ((MGSRV *) pcon->p_srv)->mode = 0;
          ((MGSRV *) pcon->p_srv)->storage_mode = 0;
-         ((MGSRV *) pcon->p_srv)->timeout = 0;
+         ((MGSRV *) pcon->p_srv)->timeout = NETX_TIMEOUT;
 
          if (pcon->server[0])
             strcpy(((MGSRV *) pcon->p_srv)->server, pcon->server);
@@ -444,11 +459,6 @@ DBX_EXTFUN(int) dbx_close(unsigned char *input, unsigned char *output)
 
    narg = mg_unpack_arguments(pcon);
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_close");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->connected == 2) {
       if (pcon->p_srv) {
          rc = 0;
@@ -466,7 +476,7 @@ DBX_EXTFUN(int) dbx_close(unsigned char *input, unsigned char *output)
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
       if (pcon->p_ydb_so->loaded) {
          rc = pcon->p_ydb_so->p_ydb_exit();
-         printf("\r\np_ydb_exit=%d\r\n", rc);
+         /* printf("\r\np_ydb_exit=%d\r\n", rc); */
       }
 
       strcpy(pcon->error, "");
@@ -489,12 +499,6 @@ DBX_EXTFUN(int) dbx_close(unsigned char *input, unsigned char *output)
          rc1 = rc;
 
          DBX_UNLOCK(rc);
-
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheEnd()", rc1);
-            fflush(pcon->p_debug->p_fdebug);
-         }
-
       }
 
       strcpy(pcon->error, "");
@@ -523,16 +527,6 @@ dbx_close_tcp:
 
    rc = mg_mutex_destroy(pcon->p_db_mutex);
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n");
-      fflush(pcon->p_debug->p_fdebug);
-      if (pcon->p_debug->p_fdebug != stdout) {
-         fclose(pcon->p_debug->p_fdebug);
-         pcon->p_debug->p_fdebug = stdout;
-      }
-      pcon->p_debug->debug = 0;
-   }
-
    rc = CACHE_SUCCESS;
    if (rc == CACHE_SUCCESS) {
       mg_create_string(pcon, (void *) &rc, DBX_DTYPE_INT);
@@ -555,11 +549,6 @@ DBX_EXTFUN(int) dbx_set(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_set");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    DBX_LOCK(rc, 0);
@@ -611,11 +600,6 @@ DBX_EXTFUN(int) dbx_get(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_get");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    DBX_LOCK(rc, 0);
@@ -681,11 +665,6 @@ DBX_EXTFUN(int) dbx_next(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_next");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    DBX_LOCK(rc, 0);
 
    if (pcon->connected == 2) {
@@ -744,11 +723,6 @@ DBX_EXTFUN(int) dbx_previous(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_previous");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    DBX_LOCK(rc, 0);
@@ -812,11 +786,6 @@ DBX_EXTFUN(int) dbx_delete(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_delete");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    DBX_LOCK(rc, 0);
 
    if (pcon->connected == 2) {
@@ -872,11 +841,6 @@ DBX_EXTFUN(int) dbx_defined(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_defined");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    DBX_LOCK(rc, 0);
@@ -936,11 +900,6 @@ DBX_EXTFUN(int) dbx_increment(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_increment");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    DBX_LOCK(rc, 0);
 
    if (pcon->connected == 2) {
@@ -987,6 +946,199 @@ dbx_increment_exit:
 }
 
 
+/* v1.2.8 */
+DBX_EXTFUN(int) dbx_tstart(unsigned char *input, unsigned char *output)
+{
+   int rc, n;
+   DBXCON *pcon;
+
+   pcon = mg_unpack_header(input, output);
+
+   if (!pcon || !pcon->connected) {
+      mg_set_error_message_ex(output ? output : input, "No Database Connection");
+      return 1;
+   }
+
+   mg_unpack_arguments(pcon);
+
+   DBX_LOCK(rc, 0);
+
+   if (pcon->connected == 2) {
+      strcpy(pcon->command, "a");
+      rc = netx_tcp_command(pcon, 0);
+      goto dbx_tstart_exit;
+   }
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      mg_set_error_message_ex(output ? output : input, "Transaction Processing only available over network based connectivity for YottaDB");
+      rc = CACHE_FAILURE;
+   }
+   else {
+      rc = pcon->p_isc_so->p_CacheTStart();
+   }
+
+   if (rc == CACHE_SUCCESS) {
+      sprintf((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset, "%d", rc);
+      n = (int) strlen((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset);
+      pcon->output_val.svalue.len_used += n;
+      mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) n, DBX_DSORT_DATA, DBX_DTYPE_DBXSTR);
+   }
+   else {
+      mg_error_message(pcon, rc);
+   }
+
+dbx_tstart_exit:
+
+   DBX_UNLOCK(rc);
+
+   return 0;
+}
+
+
+DBX_EXTFUN(int) dbx_tlevel(unsigned char *input, unsigned char *output)
+{
+   int rc, n;
+   DBXCON *pcon;
+
+   pcon = mg_unpack_header(input, output);
+
+   if (!pcon || !pcon->connected) {
+      mg_set_error_message_ex(output ? output : input, "No Database Connection");
+      return 1;
+   }
+
+   mg_unpack_arguments(pcon);
+
+   DBX_LOCK(rc, 0);
+
+   if (pcon->connected == 2) {
+      strcpy(pcon->command, "b");
+      rc = netx_tcp_command(pcon, 0);
+      goto dbx_tlevel_exit;
+   }
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      mg_set_error_message_ex(output ? output : input, "Transaction Processing only available over network based connectivity for YottaDB");
+      rc = CACHE_FAILURE;
+   }
+   else {
+      rc = pcon->p_isc_so->p_CacheTLevel();
+   }
+
+   if (rc >= 0) {
+      sprintf((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset, "%d", rc);
+      n = (int) strlen((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset);
+      pcon->output_val.svalue.len_used += n;
+      mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) n, DBX_DSORT_DATA, DBX_DTYPE_DBXSTR);
+   }
+   else {
+      mg_error_message(pcon, rc);
+   }
+
+dbx_tlevel_exit:
+
+   DBX_UNLOCK(rc);
+
+   return 0;
+}
+
+
+DBX_EXTFUN(int) dbx_tcommit(unsigned char *input, unsigned char *output)
+{
+   int rc, n;
+   DBXCON *pcon;
+
+   pcon = mg_unpack_header(input, output);
+
+   if (!pcon || !pcon->connected) {
+      mg_set_error_message_ex(output ? output : input, "No Database Connection");
+      return 1;
+   }
+
+   mg_unpack_arguments(pcon);
+
+   DBX_LOCK(rc, 0);
+
+   if (pcon->connected == 2) {
+      strcpy(pcon->command, "c");
+      rc = netx_tcp_command(pcon, 0);
+      goto dbx_tcommit_exit;
+   }
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      mg_set_error_message_ex(output ? output : input, "Transaction Processing only available over network based connectivity for YottaDB");
+      rc = CACHE_FAILURE;
+   }
+   else {
+      rc = pcon->p_isc_so->p_CacheTCommit();
+   }
+
+   if (rc == CACHE_SUCCESS) {
+      sprintf((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset, "%d", rc);
+      n = (int) strlen((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset);
+      pcon->output_val.svalue.len_used += n;
+      mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) n, DBX_DSORT_DATA, DBX_DTYPE_DBXSTR);
+   }
+   else {
+      mg_error_message(pcon, rc);
+   }
+
+dbx_tcommit_exit:
+
+   DBX_UNLOCK(rc);
+
+   return 0;
+}
+
+
+DBX_EXTFUN(int) dbx_trollback(unsigned char *input, unsigned char *output)
+{
+   int rc, n;
+   DBXCON *pcon;
+
+   pcon = mg_unpack_header(input, output);
+
+   if (!pcon || !pcon->connected) {
+      mg_set_error_message_ex(output ? output : input, "No Database Connection");
+      return 1;
+   }
+
+   mg_unpack_arguments(pcon);
+
+   DBX_LOCK(rc, 0);
+
+   if (pcon->connected == 2) {
+      strcpy(pcon->command, "d");
+      rc = netx_tcp_command(pcon, 0);
+      goto dbx_trollback_exit;
+   }
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      mg_set_error_message_ex(output ? output : input, "Transaction Processing only available over network based connectivity for YottaDB");
+      rc = CACHE_FAILURE;
+   }
+   else {
+      rc = pcon->p_isc_so->p_CacheTRollback(0);
+   }
+
+   if (rc == CACHE_SUCCESS) {
+      sprintf((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset, "%d", rc);
+      n = (int) strlen((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.offset);
+      pcon->output_val.svalue.len_used += n;
+      mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) n, DBX_DSORT_DATA, DBX_DTYPE_DBXSTR);
+   }
+   else {
+      mg_error_message(pcon, rc);
+   }
+
+dbx_trollback_exit:
+
+   DBX_UNLOCK(rc);
+
+   return 0;
+}
+
+
 DBX_EXTFUN(int) dbx_function(unsigned char *input, unsigned char *output)
 {
    int rc;
@@ -998,11 +1150,6 @@ DBX_EXTFUN(int) dbx_function(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_function");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    fun.rflag = 0;
@@ -1035,11 +1182,6 @@ DBX_EXTFUN(int) dbx_function(unsigned char *input, unsigned char *output)
       rc = pcon->p_isc_so->p_CacheExtFun(fun.rflag, pcon->argc - 1);
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheExtFun(%d, %d)", rc, fun.rflag, pcon->argc);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (rc == CACHE_SUCCESS) {
       if (pcon->dbtype != DBX_DBTYPE_YOTTADB) {
          isc_pop_value(pcon, &(pcon->output_val), DBX_DTYPE_DBXSTR);
@@ -1069,11 +1211,6 @@ DBX_EXTFUN(int) dbx_classmethod(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_classmethod");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
       pcon->error_code = 2020;
       strcpy(pcon->error, "Cache objects are not available with this platform");
@@ -1096,11 +1233,6 @@ DBX_EXTFUN(int) dbx_classmethod(unsigned char *input, unsigned char *output)
    }
 
    rc = pcon->p_isc_so->p_CacheInvokeClassMethod(pcon->argc - 2);
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheInvokeClassMethod(%d)", rc, pcon->argc);
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    if (rc == CACHE_SUCCESS) {
       isc_pop_value(pcon, &(pcon->output_val), DBX_DTYPE_DBXSTR);
@@ -1129,11 +1261,6 @@ DBX_EXTFUN(int) dbx_method(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_method");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
       pcon->error_code = 2020;
       strcpy(pcon->error, "Cache objects are not available with this platform");
@@ -1156,10 +1283,6 @@ DBX_EXTFUN(int) dbx_method(unsigned char *input, unsigned char *output)
    }
 
    rc = pcon->p_isc_so->p_CacheInvokeMethod(pcon->argc - 2);
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheInvokeMethod(%d)", rc, pcon->argc);
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    if (rc == CACHE_SUCCESS) {
       isc_pop_value(pcon, &(pcon->output_val), DBX_DTYPE_DBXSTR);
@@ -1188,11 +1311,6 @@ DBX_EXTFUN(int) dbx_getproperty(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_getproperty");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
       pcon->error_code = 2020;
       strcpy(pcon->error, "Cache objects are not available with this platform");
@@ -1215,10 +1333,6 @@ DBX_EXTFUN(int) dbx_getproperty(unsigned char *input, unsigned char *output)
    }
 
    rc = pcon->p_isc_so->p_CacheGetProperty();
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheGetProperty()", rc);
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    if (rc == CACHE_SUCCESS) {
       isc_pop_value(pcon, &(pcon->output_val), DBX_DTYPE_DBXSTR);
@@ -1247,11 +1361,6 @@ DBX_EXTFUN(int) dbx_setproperty(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_setproperty");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
       pcon->error_code = 2020;
       strcpy(pcon->error, "Cache objects are not available with this platform");
@@ -1274,10 +1383,6 @@ DBX_EXTFUN(int) dbx_setproperty(unsigned char *input, unsigned char *output)
    }
 
    rc = pcon->p_isc_so->p_CacheSetProperty();
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheSetProperty()", rc);
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    if (rc == CACHE_SUCCESS) {
       mg_create_string(pcon, (void *) "", DBX_DTYPE_STR);
@@ -1307,11 +1412,6 @@ DBX_EXTFUN(int) dbx_closeinstance(unsigned char *input, unsigned char *output)
       return 1;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_closeinstance");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
       pcon->error_code = 2020;
       strcpy(pcon->error, "Cache objects are not available with this platform");
@@ -1328,11 +1428,6 @@ DBX_EXTFUN(int) dbx_closeinstance(unsigned char *input, unsigned char *output)
    }
 
    rc = mg_class_reference(pcon, 3);
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheCloseOref(%d)", rc, (int) strtol(pcon->args[0].svalue.buf_addr, NULL, 10));
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    if (rc == CACHE_SUCCESS) {
       isc_pop_value(pcon, &(pcon->output_val), DBX_DTYPE_DBXSTR);
@@ -1361,11 +1456,6 @@ DBX_EXTFUN(int) dbx_getnamespace(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_getnamespace");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
@@ -1397,11 +1487,6 @@ DBX_EXTFUN(int) dbx_getnamespace(unsigned char *input, unsigned char *output)
 
    rc = pcon->p_isc_so->p_CacheEvalA(&expr);
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheEvalA(%p(%s))", rc, &expr, expr.str);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (rc == CACHE_SUCCESS) {
       retval.len = 256;
       rc = pcon->p_isc_so->p_CacheConvert(CACHE_ASTRING, &retval);
@@ -1412,11 +1497,6 @@ DBX_EXTFUN(int) dbx_getnamespace(unsigned char *input, unsigned char *output)
          pcon->output_val.svalue.buf_addr[retval.len + pcon->output_val.offset] = '\0';
          pcon->output_val.svalue.len_used += retval.len;
          mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) retval.len, DBX_DSORT_DATA, DBX_DTYPE_DBXSTR);
-
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheConvert(%d, %p(%s))", rc, CACHE_ASTRING, &retval, (char *) pcon->output_val.svalue.buf_addr);
-            fflush(pcon->p_debug->p_fdebug);
-         }
       }
       else {
          rc = CACHE_BAD_NAMESPACE;
@@ -1448,11 +1528,6 @@ DBX_EXTFUN(int) dbx_setnamespace(unsigned char *input, unsigned char *output)
    if (!pcon || !pcon->connected) {
       mg_set_error_message_ex(output ? output : input, "No Database Connection");
       return 1;
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> dbx_setnamespace");
-      fflush(pcon->p_debug->p_fdebug);
    }
 
    if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
@@ -1607,10 +1682,7 @@ int isc_load_library(DBXCON *pcon)
       }
 
       pcon->p_isc_so->p_library = mg_dso_load(pcon->p_isc_so->libnam);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %p==mg_dso_load(%s)", pcon->p_isc_so->p_library, pcon->p_isc_so->libnam);
-         fflush(pcon->p_debug->p_fdebug);
-      }
+
       if (pcon->p_isc_so->p_library) {
          if (strstr(libnam[n], "iris")) {
             pcon->p_isc_so->iris = 1;
@@ -1999,6 +2071,16 @@ int isc_load_library(DBXCON *pcon)
    sprintf(fun, "%sEnableMultiThread", pcon->p_isc_so->funprfx);
    pcon->p_isc_so->p_CacheEnableMultiThread = (int (*) (void)) mg_dso_sym(pcon->p_isc_so->p_library, (char *) fun);
 
+   /* v1.2.8 */
+   sprintf(fun, "%sTStart", pcon->p_isc_so->funprfx);
+   pcon->p_isc_so->p_CacheTStart = (int (*) (void)) mg_dso_sym(pcon->p_isc_so->p_library, (char *) fun);
+   sprintf(fun, "%sTLevel", pcon->p_isc_so->funprfx);
+   pcon->p_isc_so->p_CacheTLevel = (int (*) (void)) mg_dso_sym(pcon->p_isc_so->p_library, (char *) fun);
+   sprintf(fun, "%sTCommit", pcon->p_isc_so->funprfx);
+   pcon->p_isc_so->p_CacheTCommit = (int (*) (void)) mg_dso_sym(pcon->p_isc_so->p_library, (char *) fun);
+   sprintf(fun, "%sTRollback", pcon->p_isc_so->funprfx);
+   pcon->p_isc_so->p_CacheTRollback = (int (*) (int)) mg_dso_sym(pcon->p_isc_so->p_library, (char *) fun);
+
    pcon->pid = mg_current_process_id();
 
    pcon->p_isc_so->loaded = 1;
@@ -2008,7 +2090,9 @@ isc_load_library_exit:
    if (pcon->error[0]) {
       pcon->p_isc_so->loaded = 0;
       pcon->error_code = 1009;
-      strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      if (!pcon->p_srv) {
+         strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      }
       result = CACHE_NOCON;
 
       return result;
@@ -2094,32 +2178,9 @@ isc_authenticate_reopen:
 
    signal(SIGUSR1, SIG_IGN);
 
-   if (pcon->p_debug->debug == 1) {
-#if defined(MACOSX)
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> signal(SIGUSR1(%d), SIG_IGN(%p))", SIGUSR1, SIG_IGN);
-#else
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> signal(SIGUSR1(%d), SIG_IGN(%p))", SIGUSR1, SIG_IGN);
-#endif
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
 #endif
 
 	rc = pcon->p_isc_so->p_CacheSecureStartA(&pusername, &ppassword, &pexename, termflag, timeout, ppin, ppout);
-
-   if (pcon->p_debug->debug == 1) {
-/*
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheSecureStartA(%p(%s), %p(%s), %p(%s), \r\n%d, %d, %p(%s), %p(%s))", rc, &pusername, pusername.str, &ppassword, ppassword.str, &pexename, pexename.str, termflag, timeout, &pin, pin.str, &pout, pout.str);
-*/
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheSecureStartA(%p(%s),", rc, &pusername, (char *) pusername.str);
-      fprintf(pcon->p_debug->p_fdebug, "\r\n                                 %p(%s),", &ppassword, (char *) ppassword.str);
-      fprintf(pcon->p_debug->p_fdebug, "\r\n                                 %p(%s),", &pexename, (char *) pexename.str);
-      fprintf(pcon->p_debug->p_fdebug, "\r\n                                 %d, %d,", termflag, timeout);
-      fprintf(pcon->p_debug->p_fdebug, "\r\n                                 %p(%s),", ppin, ppin ? (char *) ppin->str : "null");
-      fprintf(pcon->p_debug->p_fdebug, "\r\n                                 %p(%s))", ppout, ppout ? (char *) ppout->str : "null");
-
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
 	if (rc != CACHE_SUCCESS) {
       pcon->error_code = rc;
@@ -2160,21 +2221,12 @@ isc_authenticate_reopen:
       expr.len = (unsigned short) strlen((char *) expr.str);
       rc = pcon->p_isc_so->p_CacheEvalA(&expr);
 
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheEvalA(%p(%s))", rc, &expr, expr.str);
-         fflush(pcon->p_debug->p_fdebug);
-      }
-
       if (rc == CACHE_CONBROKEN)
          reopen = 1;
       if (rc == CACHE_SUCCESS) {
          retval.len = 256;
          rc = pcon->p_isc_so->p_CacheConvert(CACHE_ASTRING, &retval);
 
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheConvert(%d, %p(%s))", rc, CACHE_ASTRING, &retval, retval.str);
-            fflush(pcon->p_debug->p_fdebug);
-         }
          if (rc == CACHE_CONBROKEN)
             reopen = 1;
          if (rc == CACHE_SUCCESS) {
@@ -2192,15 +2244,9 @@ isc_authenticate_reopen:
 
    if (pcon->p_isc_so && pcon->p_isc_so->p_CacheEnableMultiThread) {
       rc = pcon->p_isc_so->p_CacheEnableMultiThread();
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheEnableMultiThread()", rc);
-      }
    }
    else {
       rc = -1;
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheEnableMultiThread() [Not Available with this version of Cache]", rc);
-      }
    }
 
    return 1;
@@ -2231,7 +2277,9 @@ int isc_open(DBXCON *pcon)
       pcon->error_code = 1009; 
       strncpy(pcon->error, pcon->error, DBX_ERROR_SIZE - 1);
       pcon->error[DBX_ERROR_SIZE - 1] = '\0';
-      strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      if (!pcon->p_srv) {
+         strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      }
       rc = CACHE_NOCON;
       goto isc_open_exit;
    }
@@ -2249,36 +2297,23 @@ int isc_open(DBXCON *pcon)
 
    rc = pcon->p_isc_so->p_CacheSetDir(pcon->shdir);
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheSetDir(%s)", rc, pcon->shdir);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (!isc_authenticate(pcon)) {
       pcon->error_code = error_code;
-      strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      if (!pcon->p_srv) {
+         strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      }
       rc = CACHE_NOCON;
    }
    else {
-      strcpy((char *) pcon->output_val.svalue.buf_addr, "1");
+      if (!pcon->p_srv) {
+         strcpy((char *) pcon->output_val.svalue.buf_addr, "1");
+      }
       pcon->p_isc_so->loaded = 2;
       rc = CACHE_SUCCESS;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
 isc_open_exit:
-/*
-   if (rc == CACHE_SUCCESS) {
-      mg_create_string(pcon, (void *) &rc, DBX_DTYPE_INT);
-   }
-   else {
-      mg_error_message(pcon, rc);
-   }
-*/
+
    return rc;
 }
 
@@ -2364,11 +2399,6 @@ int isc_change_namespace(DBXCON *pcon, char *nspace)
 
    mg_mutex_unlock(pcon->p_db_mutex);
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheExecuteA(%p(%s))", rc, &expr, expr.str);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    return rc;
 }
 
@@ -2390,11 +2420,6 @@ int isc_pop_value(DBXCON *pcon, DBXVAL *value, int required_type)
    if (pcon->p_isc_so->p_CacheType) {
       ctype = pcon->p_isc_so->p_CacheType();
 
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheType()", ctype);
-         fflush(pcon->p_debug->p_fdebug);
-      }
-
       if (ctype == CACHE_OREF) {
          rc = pcon->p_isc_so->p_CachePopOref(&oref);
 
@@ -2404,10 +2429,6 @@ int isc_pop_value(DBXCON *pcon, DBXVAL *value, int required_type)
          value->svalue.len_used += (int) strlen((char *) value->svalue.buf_addr + value->offset);
          mg_add_block_size(&(value->svalue), 0, (unsigned long) value->svalue.len_used - value->offset, DBX_DSORT_DATA, DBX_DTYPE_OREF);
 
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CachePopOref(%d)", rc, oref);
-            fflush(pcon->p_debug->p_fdebug);
-         }
          return rc;
       }
    }
@@ -2419,17 +2440,9 @@ int isc_pop_value(DBXCON *pcon, DBXVAL *value, int required_type)
       rc = pcon->p_isc_so->p_CachePopExStr(&zstr);
       len = zstr.len;
       outstr8 = (char *) zstr.str.ch;
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CachePopExStr(%p {len=%d;str=%p})", rc, &zstr, zstr.len, (void *) zstr.str.ch);
-         fflush(pcon->p_debug->p_fdebug);
-      }
    }
    else {
       rc = pcon->p_isc_so->p_CachePopStr((int *) &len, (Callin_char_t **) &outstr8);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CachePopStr(%d, %p)", rc, len, outstr8);
-         fflush(pcon->p_debug->p_fdebug);
-      }
    }
 
 
@@ -2463,23 +2476,6 @@ int isc_pop_value(DBXCON *pcon, DBXVAL *value, int required_type)
 
    if (ex) {
       rc1 = pcon->p_isc_so->p_CacheExStrKill(&zstr);
-   }
-
-   if (pcon->p_debug->debug == 1) {
-      char buffer[128];
-      if (value->svalue.len_used > 60) {
-         strncpy(buffer, (char *) value->svalue.buf_addr, 60);
-         buffer[60] = '\0';
-         strcat(buffer, " ...");
-      }
-      else {
-         strcpy(buffer, (char *) value->svalue.buf_addr);
-      }
-      fprintf(pcon->p_debug->p_fdebug, "\r\n           >>> %s", buffer);
-      fflush(pcon->p_debug->p_fdebug);
-      if (ex) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheExStrKill(%p)", rc1, &zstr);
-      }
    }
 
    return rc;
@@ -2519,10 +2515,7 @@ int isc_error_message(DBXCON *pcon, int error_code)
          pcerror->str[0] = '\0';
          pcerror->len = 50;
          rc = pcon->p_isc_so->p_CacheErrxlateA(error_code, pcerror);
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n   >>> %d==CacheErrxlateA(%d)", rc, error_code);
-            fflush(pcon->p_debug->p_fdebug);
-         }
+
          pcerror->str[50] = '\0';
 
          if (pcerror->len > 0) {
@@ -2685,10 +2678,6 @@ int ydb_load_library(DBXCON *pcon)
       }
 
       pcon->p_ydb_so->p_library = mg_dso_load(pcon->p_ydb_so->libnam);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %p==mg_dso_load(%s)", pcon->p_ydb_so->p_library, pcon->p_ydb_so->libnam);
-         fflush(pcon->p_debug->p_fdebug);
-      }
       if (pcon->p_ydb_so->p_library) {
          break;
       }
@@ -2856,9 +2845,10 @@ ydb_load_library_exit:
    if (pcon->error[0]) {
       pcon->p_ydb_so->loaded = 0;
       pcon->error_code = 1009;
-      strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      if (!pcon->p_srv) {
+         strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      }
       result = CACHE_NOCON;
-
       return result;
    }
 
@@ -2921,26 +2911,12 @@ int ydb_open(DBXCON *pcon)
       data.buf_addr[data.len_used] = '\0';
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n");
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (rc == CACHE_SUCCESS) {
       ydb_parse_zv(data.buf_addr, &(pcon->zv));
       sprintf(pcon->p_zv->version, "%d.%d.b%d", pcon->p_zv->majorversion, pcon->p_zv->minorversion, pcon->p_zv->mg_build);
    }
 
 ydb_open_exit:
-
-/*
-   if (rc == CACHE_SUCCESS) {
-      mg_create_string(pcon, (void *) &rc, DBX_DTYPE_INT);
-   }
-   else {
-      mg_error_message(pcon, rc);
-   }
-*/
 
    return rc;
 }
@@ -3057,6 +3033,286 @@ int ydb_function(DBXCON *pcon, DBXFUN *pfun)
    }
 
    pcon->output_val.svalue.len_used = (int) strlen(pcon->output_val.svalue.buf_addr);
+
+   return rc;
+}
+
+
+int gtm_load_library(DBXCON *pcon)
+{
+   int n, len, result;
+   char primlib[DBX_ERROR_SIZE], primerr[DBX_ERROR_SIZE];
+   char verfile[256], fun[64];
+   char *libnam[16];
+
+   strcpy(pcon->p_gtm_so->libdir, pcon->shdir);
+   strcpy(pcon->p_gtm_so->funprfx, "gtm");
+   strcpy(pcon->p_gtm_so->dbname, "GT.M");
+
+   strcpy(verfile, pcon->shdir);
+   len = (int) strlen(pcon->p_gtm_so->libdir);
+   if (pcon->p_gtm_so->libdir[len - 1] != '/' && pcon->p_gtm_so->libdir[len - 1] != '\\') {
+      pcon->p_gtm_so->libdir[len] = '/';
+      len ++;
+   }
+
+   n = 0;
+#if defined(_WIN32)
+   libnam[n ++] = (char *) DBX_GTM_DLL;
+#else
+#if defined(MACOSX)
+   libnam[n ++] = (char *) DBX_GTM_DYLIB;
+   libnam[n ++] = (char *) DBX_GTM_SO;
+#else
+   libnam[n ++] = (char *) DBX_GTM_SO;
+   libnam[n ++] = (char *) DBX_GTM_DYLIB;
+#endif
+#endif
+
+   libnam[n ++] = NULL;
+   strcpy(pcon->p_gtm_so->libnam, pcon->p_gtm_so->libdir);
+   len = (int) strlen(pcon->p_gtm_so->libnam);
+
+   for (n = 0; libnam[n]; n ++) {
+      strcpy(pcon->p_gtm_so->libnam + len, libnam[n]);
+      if (!n) {
+         strcpy(primlib, pcon->p_gtm_so->libnam);
+      }
+
+      pcon->p_gtm_so->p_library = mg_dso_load(pcon->p_gtm_so->libnam);
+      if (pcon->p_gtm_so->p_library) {
+         break;
+      }
+
+      if (!n) {
+         int len1, len2;
+         char *p;
+#if defined(_WIN32)
+         DWORD errorcode;
+         LPVOID lpMsgBuf;
+
+         lpMsgBuf = NULL;
+         errorcode = GetLastError();
+         sprintf(pcon->error, "Error loading %s Library: %s; Error Code : %ld",  pcon->p_gtm_so->dbname, primlib, errorcode);
+         len2 = (int) strlen(pcon->error);
+         len1 = FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                        NULL,
+                        errorcode,
+                        /* MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), */
+                        MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                        (LPTSTR) &lpMsgBuf,
+                        0,
+                        NULL 
+                        );
+         if (lpMsgBuf && len1 > 0 && (DBX_ERROR_SIZE - len2) > 30) {
+            strncpy(primerr, (const char *) lpMsgBuf, DBX_ERROR_SIZE - 1);
+            p = strstr(primerr, "\r\n");
+            if (p)
+               *p = '\0';
+            len1 = (DBX_ERROR_SIZE - (len2 + 10));
+            if (len1 < 1)
+               len1 = 0;
+            primerr[len1] = '\0';
+            p = strstr(primerr, "%1");
+            if (p) {
+               *p = 'I';
+               *(p + 1) = 't';
+            }
+            strcat(pcon->error, " (");
+            strcat(pcon->error, primerr);
+            strcat(pcon->error, ")");
+         }
+         if (lpMsgBuf)
+            LocalFree(lpMsgBuf);
+#else
+         p = (char *) dlerror();
+         sprintf(primerr, "Cannot load %s library: Error Code: %d", pcon->p_gtm_so->dbname, errno);
+         len2 = strlen(pcon->error);
+         if (p) {
+            strncpy(primerr, p, DBX_ERROR_SIZE - 1);
+            primerr[DBX_ERROR_SIZE - 1] = '\0';
+            len1 = (DBX_ERROR_SIZE - (len2 + 10));
+            if (len1 < 1)
+               len1 = 0;
+            primerr[len1] = '\0';
+            strcat(pcon->error, " (");
+            strcat(pcon->error, primerr);
+            strcat(pcon->error, ")");
+         }
+#endif
+      }
+   }
+
+   if (!pcon->p_gtm_so->p_library) {
+      goto gtm_load_library_exit;
+   }
+
+   sprintf(fun, "%s_init", pcon->p_gtm_so->funprfx);
+   pcon->p_gtm_so->p_gtm_init = (int (*) (void)) mg_dso_sym(pcon->p_gtm_so->p_library, (char *) fun);
+   if (!pcon->p_gtm_so->p_gtm_init) {
+      sprintf(pcon->error, "Error loading %s library: %s; Cannot locate the following function : %s", pcon->p_gtm_so->dbname, pcon->p_gtm_so->libnam, fun);
+      goto gtm_load_library_exit;
+   }
+   sprintf(fun, "%s_exit", pcon->p_gtm_so->funprfx);
+   pcon->p_gtm_so->p_gtm_exit = (int (*) (void)) mg_dso_sym(pcon->p_gtm_so->p_library, (char *) fun);
+   if (!pcon->p_gtm_so->p_gtm_exit) {
+      sprintf(pcon->error, "Error loading %s library: %s; Cannot locate the following function : %s", pcon->p_gtm_so->dbname, pcon->p_gtm_so->libnam, fun);
+      goto gtm_load_library_exit;
+   }
+
+   sprintf(fun, "%s_ci", pcon->p_gtm_so->funprfx);
+   pcon->p_gtm_so->p_gtm_ci = (int (*) (const char *, ...)) mg_dso_sym(pcon->p_gtm_so->p_library, (char *) fun);
+   if (!pcon->p_gtm_so->p_gtm_ci) {
+      sprintf(pcon->error, "Error loading %s library: %s; Cannot locate the following function : %s", pcon->p_gtm_so->dbname, pcon->p_gtm_so->libnam, fun);
+      goto gtm_load_library_exit;
+   }
+
+   sprintf(fun, "%s_zstatus", pcon->p_gtm_so->funprfx);
+   pcon->p_gtm_so->p_gtm_ci = (int (*) (const char *, ...)) mg_dso_sym(pcon->p_gtm_so->p_library, (char *) fun);
+   if (!pcon->p_gtm_so->p_gtm_ci) {
+      sprintf(pcon->error, "Error loading %s library: %s; Cannot locate the following function : %s", pcon->p_gtm_so->dbname, pcon->p_gtm_so->libnam, fun);
+      goto gtm_load_library_exit;
+   }
+
+   pcon->pid = mg_current_process_id();
+
+   pcon->p_gtm_so->loaded = 1;
+
+gtm_load_library_exit:
+
+   if (pcon->error[0]) {
+      pcon->p_gtm_so->loaded = 0;
+      pcon->error_code = 1009;
+      if (!pcon->p_srv) {
+         strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      }
+      result = CACHE_NOCON;
+      return result;
+   }
+
+   return CACHE_SUCCESS;
+}
+
+
+int gtm_open(DBXCON *pcon)
+{
+   int rc, error_code, result;
+   char buffer[256];
+
+   error_code = 0;
+   rc = CACHE_SUCCESS;
+
+   if (!pcon->p_gtm_so) {
+      pcon->p_gtm_so = (DBXGTMSO *) mg_malloc(sizeof(DBXGTMSO), 0);
+      if (!pcon->p_gtm_so) {
+         strcpy(pcon->error, "No Memory");
+         pcon->error_code = 1009; 
+         result = CACHE_NOCON;
+         return result;
+      }
+      memset((void *) pcon->p_gtm_so, 0, sizeof(DBXGTMSO));
+      pcon->p_gtm_so->loaded = 0;
+   }
+
+   if (pcon->p_gtm_so->loaded == 2) {
+      strcpy(pcon->error, "Cannot create multiple connections to the database");
+      pcon->error_code = 1009; 
+      strncpy(pcon->error, pcon->error, DBX_ERROR_SIZE - 1);
+      pcon->error[DBX_ERROR_SIZE - 1] = '\0';
+      strcpy((char *) pcon->output_val.svalue.buf_addr, "0");
+      rc = CACHE_NOCON;
+      goto gtm_open_exit;
+   }
+
+   if (!pcon->p_gtm_so->loaded) {
+      rc = gtm_load_library(pcon);
+      if (rc != CACHE_SUCCESS) {
+         goto gtm_open_exit;
+      }
+   }
+
+   rc = pcon->p_gtm_so->p_gtm_init();
+
+   rc = (int) pcon->p_gtm_so->p_gtm_ci("ifc_zmgsis", buffer, "0", "", "$zv");
+
+   if (rc == CACHE_SUCCESS) {
+      gtm_parse_zv(buffer, &(pcon->zv));
+      sprintf(pcon->p_zv->version, "%d.%d.b%d", pcon->p_zv->majorversion, pcon->p_zv->minorversion, pcon->p_zv->mg_build);
+   }
+
+gtm_open_exit:
+
+   return rc;
+}
+
+
+int gtm_parse_zv(char *zv, DBXZV * p_gtm_sv)
+{
+   int result;
+   double mg_version;
+   char *p, *p1, *p2;
+
+   p_gtm_sv->mg_version = 0;
+   p_gtm_sv->majorversion = 0;
+   p_gtm_sv->minorversion = 0;
+   p_gtm_sv->mg_build = 0;
+   p_gtm_sv->vnumber = 0;
+
+   result = 0;
+   /* GT.M V6.3-004 Linux x86_64 */
+
+   p_gtm_sv->product = DBX_DBTYPE_YOTTADB;
+
+   p = zv;
+   mg_version = 0;
+   while (*(++ p)) {
+      if (*(p - 1) == 'V' && isdigit((int) (*p))) {
+         mg_version = strtod(p, NULL);
+         break;
+      }
+   }
+
+   if (mg_version > 0) {
+      p_gtm_sv->mg_version = mg_version;
+      p_gtm_sv->majorversion = (int) strtol(p, NULL, 10);
+      p1 = strstr(p, ".");
+      if (p1) {
+         p_gtm_sv->minorversion = (int) strtol(p1 + 1, NULL, 10);
+      }
+      p2 = strstr(p, "-");
+      if (p2) {
+         p_gtm_sv->mg_build = (int) strtol(p2 + 1, NULL, 10);
+      }
+
+      p_gtm_sv->vnumber = ((p_gtm_sv->majorversion * 100000) + (p_gtm_sv->minorversion * 10000) + p_gtm_sv->mg_build);
+
+      result = 1;
+   }
+/*
+   printf("\r\n gtm_parse_zv : p_gtm_sv->majorversion=%d; p_gtm_sv->minorversion=%d; p_gtm_sv->mg_build=%d; p_gtm_sv->mg_version=%f;", p_gtm_sv->majorversion, p_gtm_sv->minorversion, p_gtm_sv->mg_build, p_gtm_sv->mg_version);
+*/
+   return result;
+}
+
+
+int gtm_error_message(DBXCON *pcon, int error_code)
+{
+   int rc;
+   char buffer[256];
+
+   if (pcon->p_gtm_so && pcon->p_gtm_so->p_gtm_zstatus) {
+      pcon->p_gtm_so->p_gtm_zstatus(buffer, 255);
+      strcpy(pcon->error, buffer);
+      rc = CACHE_SUCCESS;
+   }
+   else {
+      if (!pcon->error[0]) {
+         strcpy(pcon->error, "No connection has been established");
+      }
+      rc = CACHE_NOCON;
+   }
+
+   mg_set_error_message(pcon);
 
    return rc;
 }
@@ -3518,6 +3774,9 @@ int mg_buf_resize(MGBUF *p_buf, unsigned long size)
 
 int mg_buf_free(MGBUF *p_buf)
 {
+   if (!p_buf)
+      return 0;
+
    if (p_buf->p_buffer)
       mg_free((void *) p_buf->p_buffer, 0);
 
@@ -3609,23 +3868,25 @@ int mg_buf_cat(LPMGBUF p_buf, char *buffer, unsigned long size)
 
 void * mg_realloc(void *p, int curr_size, int new_size, short id)
 {
-   if (new_size >= curr_size) {
-      if (p) {
-         mg_free((void *) p, 0);
-      }
-      /* printf("\r\n curr_size=%d; new_size=%d;\r\n", curr_size, new_size); */
-
-      /* p = (void *) erealloc((void *) p, new_size); */
+   if (dbx_ext_realloc) {
+      p = (void *) dbx_ext_realloc((void *) p, (unsigned long) new_size);
+   }
+   else {
+      if (new_size >= curr_size) {
+         if (p) {
+            mg_free((void *) p, 0);
+         }
 
 #if defined(_WIN32)
-      p = (void *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, new_size + 32);
+         p = (void *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, new_size + 32);
 #else
-      p = (void *) mg_malloc(new_size, id);
+         p = (void *) mg_malloc(new_size, id);
 #endif
-      if (!p) {
-         return NULL;
       }
    }
+
+   /* printf("\r\n curr_size=%d; new_size=%d;\r\n", curr_size, new_size); */
+
    return p;
 }
 
@@ -3634,13 +3895,16 @@ void * mg_malloc(int size, short id)
 {
    void *p;
 
-   /* p = (void *) emalloc(size); */
-
+   if (dbx_ext_malloc) {
+      p = (void *) dbx_ext_malloc((unsigned long) size);
+   }
+   else {
 #if defined(_WIN32)
-   p = (void *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size + 32);
+      p = (void *) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size + 32);
 #else
-   p = (void *) malloc(size);
+      p = (void *) malloc(size);
 #endif
+   }
 
    /* printf("\nmg_malloc: size=%d; id=%d; p=%p;", size, id, p); */
 
@@ -3652,13 +3916,16 @@ int mg_free(void *p, short id)
 {
    /* printf("\nmg_free: id=%d; p=%p;", id, p); */
 
-   /* efree((void *) p); */
-
+   if (dbx_ext_free) {
+      dbx_ext_free((void *) p);
+   }
+   else {
 #if defined(_WIN32)
-   HeapFree(GetProcessHeap(), 0, p);
+      HeapFree(GetProcessHeap(), 0, p);
 #else
-   free((void *) p);
+      free((void *) p);
 #endif
+   }
 
    return 0;
 }
@@ -3725,86 +3992,36 @@ int mg_create_string(DBXCON *pcon, void *data, short type)
 }
 
 
-int mg_buffer_dump(DBXCON *pcon, void *buffer, unsigned int len, char *title, short mode)
+int mg_log_init(DBXLOG *p_log)
 {
-   unsigned int n;
-   unsigned char *p8;
-   unsigned short c;
+   p_log->log_errors = 0;
+   p_log->log_functions = 0;
+   p_log->log_transmissions = 0;
+   p_log->log_file[0] = '\0';
+   p_log->log_level[0] = '\0';
+   p_log->log_filter[0] = '\0';
+   p_log->fun_no = 0;
+   p_log->req_no = 0;
 
-   p8 = NULL;
-
-   p8 = (unsigned char *) buffer;
-
-   if (pcon && pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "%s (size=%d)\r\n", title, len);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-   else {
-      printf("\nbuffer dump (title=%s; size=%d; mode=%d)...\n", title, len, mode);
-   }
-
-   for (n = 0; n < len; n ++) {
-      c = p8[n];
-
-      if (mode == 1) {
-         if (pcon && pcon->p_debug->debug == 1)
-            fprintf(pcon->p_debug->p_fdebug, "\\x%04x ", c);
-         else
-            printf("\\x%04x ", c);
-
-         if (!((n + 1) % 8)) {
-            if (pcon && pcon->p_debug->debug == 1)
-               fprintf(pcon->p_debug->p_fdebug, "\r\n");
-            else
-               printf("\r\n");
-         }
-      }
-      else {
-         if ((c < 32) || (c > 126)) {
-            if (pcon && pcon->p_debug->debug == 1)
-               fprintf(pcon->p_debug->p_fdebug, "\\x%02x", c);
-            else
-               printf("\\x%02x", c);
-         }
-         else {
-            if (pcon && pcon->p_debug->debug == 1)
-               fprintf(pcon->p_debug->p_fdebug, "%c", (char) c);
-            else
-               printf("%c", (char) c);
-         }
-      }
-   }
-
-   if (pcon && pcon->p_debug->debug == 1) {
-      fflush(pcon->p_debug->p_fdebug);
-   }
+   p_log->product[0] = '\0';
+   p_log->product_version[0] = '\0';
 
    return 0;
 }
 
 
-int mg_log_event(DBXDEBUG *p_debug, char *message, char *title, int level)
+int mg_log_event(DBXLOG *p_log, char *message, char *title, int level)
 {
-   if (p_debug && p_debug->debug == 1) {
-      fprintf(p_debug->p_fdebug, "\r\n   >>> event: %s", title);
-      fprintf(p_debug->p_fdebug, "\r\n       >>> %s", message);
-      fflush(p_debug->p_fdebug);
-   }
-   return 1;
-
-#if 0
    int len, n;
-   FILE *fp = NULL;
    char timestr[64], heading[256], buffer[2048];
    char *p_buffer;
    time_t now = 0;
-#ifdef _WIN32
+#if defined(_WIN32)
    HANDLE hLogfile = 0;
    DWORD dwPos = 0, dwBytesWritten = 0;
-#endif
-
-#ifdef _WIN32
-__try {
+#else
+   FILE *fp = NULL;
+   struct flock lock;
 #endif
 
    now = time(NULL);
@@ -3816,18 +4033,14 @@ __try {
       }
    }
 
-#ifdef _WIN32
-   sprintf(heading, ">>> Time: %s; Build: %s", timestr, MG_VERSION);
-#else
-   sprintf(heading, ">>> PID=%ld; RN=%ld; Time: %s; Build: %s", (long) getpid(), (long) request_no, timestr, MG_VERSION);
-#endif
+   sprintf(heading, ">>> Time: %s; Build: %s pid=%lu;tid=%lu;req_no=%lu;fun_no=%lu", timestr, DBX_VERSION, (unsigned long) mg_current_process_id(), (unsigned long) mg_current_thread_id(), p_log->req_no, p_log->fun_no);
 
-   len = (int) strlen(heading) + (int) strlen(title) + (int) strlen(event) + 20;
+   len = (int) strlen(heading) + (int) strlen(title) + (int) strlen(message) + 20;
 
    if (len < 2000)
       p_buffer = buffer;
    else
-      p_buffer = (char *) mg_malloc(sizeof(char) * len, 0);
+      p_buffer = (char *) malloc(sizeof(char) * len);
 
    if (p_buffer == NULL)
       return 0;
@@ -3837,14 +4050,14 @@ __try {
    strcat(p_buffer, "\r\n    ");
    strcat(p_buffer, title);
    strcat(p_buffer, "\r\n    ");
-   strcat(p_buffer, event);
-   len = ((int) strlen(p_buffer)) * sizeof(char);
+   strcat(p_buffer, message);
+   len = (int) strlen(p_buffer) * sizeof(char);
 
-#ifdef _WIN32
+#if defined(_WIN32)
 
    strcat(p_buffer, "\r\n");
    len = len + (2 * sizeof(char));
-   hLogfile = CreateFile(MG_LOG_FILE, GENERIC_WRITE, FILE_SHARE_WRITE,
+   hLogfile = CreateFileA(p_log->log_file, GENERIC_WRITE, FILE_SHARE_WRITE,
                          (LPSECURITY_ATTRIBUTES) NULL, OPEN_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, (HANDLE) NULL);
    dwPos = SetFilePointer(hLogfile, 0, (LPLONG) NULL, FILE_END);
@@ -3856,29 +4069,83 @@ __try {
 #else /* UNIX or VMS */
 
    strcat(p_buffer, "\n");
-   fp = fopen(MG_LOG_FILE, "a");
+   fp = fopen(p_log->log_file, "a");
    if (fp) {
+
+      lock.l_type = F_WRLCK;
+      lock.l_start = 0;
+      lock.l_whence = SEEK_SET;
+      lock.l_len = 0;
+      n = fcntl(fileno(fp), F_SETLKW, &lock);
+
       fputs(p_buffer, fp);
       fclose(fp);
+
+      lock.l_type = F_UNLCK;
+      lock.l_start = 0;
+      lock.l_whence = SEEK_SET;
+      lock.l_len = 0;
+      n = fcntl(fileno(fp), F_SETLK, &lock);
    }
 
 #endif
 
-   if (p_buffer != buffer) {
-      mg_free((void *) p_buffer, 0);
-   }
+   if (p_buffer != buffer)
+      free((void *) p_buffer);
 
    return 1;
-
-#ifdef _WIN32
 }
-__except (EXCEPTION_EXECUTE_HANDLER ) {
+
+
+int mg_log_buffer(DBXLOG *p_log, char *buffer, int buffer_len, char *title, int level)
+{
+   unsigned int c, len, strt;
+   int n, n1, nc, size;
+   char tmp[16];
+   char *p;
+
+   for (n = 0, nc = 0; n < buffer_len; n ++) {
+      c = (unsigned int) buffer[n];
+      if (c < 32 || c > 126)
+         nc ++;
+   }
+
+   size = buffer_len + (nc * 4) + 32;
+   p = (char *) malloc(sizeof(char) * size);
+   if (!p)
       return 0;
-}
 
-#endif
-#endif
+   if (nc) {
 
+      for (n = 0, nc = 0; n < buffer_len; n ++) {
+         c = (unsigned int) buffer[n];
+         if (c < 32 || c > 126) {
+            sprintf((char *) tmp, "%02x", c);
+            len = (int) strlen(tmp);
+            if (len > 2)
+               strt = len - 2;
+            else
+               strt = 0;
+            p[nc ++] = '\\';
+            p[nc ++] = 'x';
+            for (n1 = strt; tmp[n1]; n1 ++)
+               p[nc ++] = tmp[n1];
+         }
+         else
+            p[nc ++] = buffer[n];
+      }
+      p[nc] = '\0';
+   }
+   else {
+      strncpy(p, buffer, buffer_len);
+      p[buffer_len] = '\0';
+   }
+
+   mg_log_event(p_log, (char *) p, title, level);
+
+   free((void *) p);
+
+   return 1;
 }
 
 
@@ -4002,10 +4269,15 @@ int mg_set_error_message(DBXCON *pcon)
 {
    int len;
 
-   len = (int) strlen(pcon->error);
-   strcpy((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.svalue.len_used, pcon->error);
-   pcon->output_val.svalue.len_used += len;
-   mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) len, DBX_DSORT_ERROR, DBX_DTYPE_DBXSTR);
+   if (pcon->p_srv) {
+      strcpy(((MGSRV *) pcon->p_srv)->error_mess, pcon->error);
+   }
+   else {
+      len = (int) strlen(pcon->error);
+      strcpy((char *) pcon->output_val.svalue.buf_addr + pcon->output_val.svalue.len_used, pcon->error   );
+      pcon->output_val.svalue.len_used += len;
+      mg_add_block_size(&(pcon->output_val.svalue), 0, (unsigned long) len, DBX_DSORT_ERROR, DBX_DTYPE_DBXSTR);
+   }
 
    return 0;
 }
@@ -4013,7 +4285,6 @@ int mg_set_error_message(DBXCON *pcon)
 
 int mg_set_error_message_ex(unsigned char *output, char *error_message)
 {
-
    mg_set_size((unsigned char *) output, (int) strlen(error_message));
 
    output[4] = (unsigned char) ((DBX_DSORT_ERROR * 20) + DBX_DTYPE_DBXSTR);
@@ -4038,11 +4309,6 @@ int mg_cleanup(DBXCON *pcon)
       if (pcon->args[n].cvalue.pstr) {
          /* printf("\r\nmg_cleanup %d &zstr=%p; pstr=%p;", n, &(pcon->cargs[n].zstr), pcon->cargs[n].pstr); */
          rc = pcon->p_isc_so->p_CacheExStrKill(&(pcon->args[n].cvalue.zstr));
-
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %d==CacheExStrKill(%p)", rc, &(pcon->args[n].cvalue.zstr));
-            fflush(pcon->p_debug->p_fdebug);
-         }
 
          pcon->args[n].cvalue.pstr = NULL;
       }
@@ -4187,6 +4453,26 @@ int mg_mutex_destroy(DBXMUTEX *p_mutex)
 }
 
 
+int mg_init_critical_section(void *p_crit)
+{
+#if defined(_WIN32)
+   InitializeCriticalSection((LPCRITICAL_SECTION) p_crit);
+#endif
+
+   return 0;
+}
+
+
+int mg_delete_critical_section(void *p_crit)
+{
+#if defined(_WIN32)
+   DeleteCriticalSection((LPCRITICAL_SECTION) p_crit);
+#endif
+
+   return 0;
+}
+
+
 int mg_enter_critical_section(void *p_crit)
 {
    int result;
@@ -4281,43 +4567,33 @@ int netx_load_winsock(DBXCON *pcon, int context)
 
    netx_so.plibrary = mg_dso_load(netx_so.libnam);
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %p==netx_dso_load(%s)", netx_so.plibrary, netx_so.libnam);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (!netx_so.plibrary) {
       netx_so.winsock = 1;
       strcpy(netx_so.libnam, "WSOCK32.DLL");
       netx_so.plibrary = mg_dso_load(netx_so.libnam);
-
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n       >>> %p==netx_dso_load(%s)", netx_so.plibrary, netx_so.libnam);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (!netx_so.plibrary) {
          goto netx_load_winsock_no_so;
       }
    }
 
-   netx_so.p_WSASocket             = (LPFN_WSASOCKET)              mg_dso_sym(netx_so.plibrary, "WSASocketA");
-   netx_so.p_WSAGetLastError       = (LPFN_WSAGETLASTERROR)        mg_dso_sym(netx_so.plibrary, "WSAGetLastError");
-   netx_so.p_WSAStartup            = (LPFN_WSASTARTUP)             mg_dso_sym(netx_so.plibrary, "WSAStartup");
-   netx_so.p_WSACleanup            = (LPFN_WSACLEANUP)             mg_dso_sym(netx_so.plibrary, "WSACleanup");
-   netx_so.p_WSAFDIsSet            = (LPFN_WSAFDISSET)             mg_dso_sym(netx_so.plibrary, "__WSAFDIsSet");
-   netx_so.p_WSARecv               = (LPFN_WSARECV)                mg_dso_sym(netx_so.plibrary, "WSARecv");
-   netx_so.p_WSASend               = (LPFN_WSASEND)                mg_dso_sym(netx_so.plibrary, "WSASend");
+   netx_so.p_WSASocket             = (MG_LPFN_WSASOCKET)              mg_dso_sym(netx_so.plibrary, "WSASocketA");
+   netx_so.p_WSAGetLastError       = (MG_LPFN_WSAGETLASTERROR)        mg_dso_sym(netx_so.plibrary, "WSAGetLastError");
+   netx_so.p_WSAStartup            = (MG_LPFN_WSASTARTUP)             mg_dso_sym(netx_so.plibrary, "WSAStartup");
+   netx_so.p_WSACleanup            = (MG_LPFN_WSACLEANUP)             mg_dso_sym(netx_so.plibrary, "WSACleanup");
+   netx_so.p_WSAFDIsSet            = (MG_LPFN_WSAFDISSET)             mg_dso_sym(netx_so.plibrary, "__WSAFDIsSet");
+   netx_so.p_WSARecv               = (MG_LPFN_WSARECV)                mg_dso_sym(netx_so.plibrary, "WSARecv");
+   netx_so.p_WSASend               = (MG_LPFN_WSASEND)                mg_dso_sym(netx_so.plibrary, "WSASend");
 
 #if defined(NETX_IPV6)
-   netx_so.p_WSAStringToAddress    = (LPFN_WSASTRINGTOADDRESS)     mg_dso_sym(netx_so.plibrary, "WSAStringToAddressA");
-   netx_so.p_WSAAddressToString    = (LPFN_WSAADDRESSTOSTRING)     mg_dso_sym(netx_so.plibrary, "WSAAddressToStringA");
-   netx_so.p_getaddrinfo           = (LPFN_GETADDRINFO)            mg_dso_sym(netx_so.plibrary, "getaddrinfo");
-   netx_so.p_freeaddrinfo          = (LPFN_FREEADDRINFO)           mg_dso_sym(netx_so.plibrary, "freeaddrinfo");
-   netx_so.p_getnameinfo           = (LPFN_GETNAMEINFO)            mg_dso_sym(netx_so.plibrary, "getnameinfo");
-   netx_so.p_getpeername           = (LPFN_GETPEERNAME)            mg_dso_sym(netx_so.plibrary, "getpeername");
-   netx_so.p_inet_ntop             = (LPFN_INET_NTOP)              mg_dso_sym(netx_so.plibrary, "InetNtop");
-   netx_so.p_inet_pton             = (LPFN_INET_PTON)              mg_dso_sym(netx_so.plibrary, "InetPton");
+   netx_so.p_WSAStringToAddress    = (MG_LPFN_WSASTRINGTOADDRESS)     mg_dso_sym(netx_so.plibrary, "WSAStringToAddressA");
+   netx_so.p_WSAAddressToString    = (MG_LPFN_WSAADDRESSTOSTRING)     mg_dso_sym(netx_so.plibrary, "WSAAddressToStringA");
+   netx_so.p_getaddrinfo           = (MG_LPFN_GETADDRINFO)            mg_dso_sym(netx_so.plibrary, "getaddrinfo");
+   netx_so.p_freeaddrinfo          = (MG_LPFN_FREEADDRINFO)           mg_dso_sym(netx_so.plibrary, "freeaddrinfo");
+   netx_so.p_getnameinfo           = (MG_LPFN_GETNAMEINFO)            mg_dso_sym(netx_so.plibrary, "getnameinfo");
+   netx_so.p_getpeername           = (MG_LPFN_GETPEERNAME)            mg_dso_sym(netx_so.plibrary, "getpeername");
+   netx_so.p_inet_ntop             = (MG_LPFN_INET_NTOP)              mg_dso_sym(netx_so.plibrary, "InetNtop");
+   netx_so.p_inet_pton             = (MG_LPFN_INET_PTON)              mg_dso_sym(netx_so.plibrary, "InetPton");
 #else
    netx_so.p_WSAStringToAddress    = NULL;
    netx_so.p_WSAAddressToString    = NULL;
@@ -4329,31 +4605,31 @@ int netx_load_winsock(DBXCON *pcon, int context)
    netx_so.p_inet_pton             = NULL;
 #endif
 
-   netx_so.p_closesocket           = (LPFN_CLOSESOCKET)            mg_dso_sym(netx_so.plibrary, "closesocket");
-   netx_so.p_gethostname           = (LPFN_GETHOSTNAME)            mg_dso_sym(netx_so.plibrary, "gethostname");
-   netx_so.p_gethostbyname         = (LPFN_GETHOSTBYNAME)          mg_dso_sym(netx_so.plibrary, "gethostbyname");
-   netx_so.p_getservbyname         = (LPFN_GETSERVBYNAME)          mg_dso_sym(netx_so.plibrary, "getservbyname");
-   netx_so.p_gethostbyaddr         = (LPFN_GETHOSTBYADDR)          mg_dso_sym(netx_so.plibrary, "gethostbyaddr");
-   netx_so.p_htons                 = (LPFN_HTONS)                  mg_dso_sym(netx_so.plibrary, "htons");
-   netx_so.p_htonl                 = (LPFN_HTONL)                  mg_dso_sym(netx_so.plibrary, "htonl");
-   netx_so.p_ntohl                 = (LPFN_NTOHL)                  mg_dso_sym(netx_so.plibrary, "ntohl");
-   netx_so.p_ntohs                 = (LPFN_NTOHS)                  mg_dso_sym(netx_so.plibrary, "ntohs");
-   netx_so.p_connect               = (LPFN_CONNECT)                mg_dso_sym(netx_so.plibrary, "connect");
-   netx_so.p_inet_addr             = (LPFN_INET_ADDR)              mg_dso_sym(netx_so.plibrary, "inet_addr");
-   netx_so.p_inet_ntoa             = (LPFN_INET_NTOA)              mg_dso_sym(netx_so.plibrary, "inet_ntoa");
+   netx_so.p_closesocket           = (MG_LPFN_CLOSESOCKET)            mg_dso_sym(netx_so.plibrary, "closesocket");
+   netx_so.p_gethostname           = (MG_LPFN_GETHOSTNAME)            mg_dso_sym(netx_so.plibrary, "gethostname");
+   netx_so.p_gethostbyname         = (MG_LPFN_GETHOSTBYNAME)          mg_dso_sym(netx_so.plibrary, "gethostbyname");
+   netx_so.p_getservbyname         = (MG_LPFN_GETSERVBYNAME)          mg_dso_sym(netx_so.plibrary, "getservbyname");
+   netx_so.p_gethostbyaddr         = (MG_LPFN_GETHOSTBYADDR)          mg_dso_sym(netx_so.plibrary, "gethostbyaddr");
+   netx_so.p_htons                 = (MG_LPFN_HTONS)                  mg_dso_sym(netx_so.plibrary, "htons");
+   netx_so.p_htonl                 = (MG_LPFN_HTONL)                  mg_dso_sym(netx_so.plibrary, "htonl");
+   netx_so.p_ntohl                 = (MG_LPFN_NTOHL)                  mg_dso_sym(netx_so.plibrary, "ntohl");
+   netx_so.p_ntohs                 = (MG_LPFN_NTOHS)                  mg_dso_sym(netx_so.plibrary, "ntohs");
+   netx_so.p_connect               = (MG_LPFN_CONNECT)                mg_dso_sym(netx_so.plibrary, "connect");
+   netx_so.p_inet_addr             = (MG_LPFN_INET_ADDR)              mg_dso_sym(netx_so.plibrary, "inet_addr");
+   netx_so.p_inet_ntoa             = (MG_LPFN_INET_NTOA)              mg_dso_sym(netx_so.plibrary, "inet_ntoa");
 
-   netx_so.p_socket                = (LPFN_SOCKET)                 mg_dso_sym(netx_so.plibrary, "socket");
-   netx_so.p_setsockopt            = (LPFN_SETSOCKOPT)             mg_dso_sym(netx_so.plibrary, "setsockopt");
-   netx_so.p_getsockopt            = (LPFN_GETSOCKOPT)             mg_dso_sym(netx_so.plibrary, "getsockopt");
-   netx_so.p_getsockname           = (LPFN_GETSOCKNAME)            mg_dso_sym(netx_so.plibrary, "getsockname");
+   netx_so.p_socket                = (MG_LPFN_SOCKET)                 mg_dso_sym(netx_so.plibrary, "socket");
+   netx_so.p_setsockopt            = (MG_LPFN_SETSOCKOPT)             mg_dso_sym(netx_so.plibrary, "setsockopt");
+   netx_so.p_getsockopt            = (MG_LPFN_GETSOCKOPT)             mg_dso_sym(netx_so.plibrary, "getsockopt");
+   netx_so.p_getsockname           = (MG_LPFN_GETSOCKNAME)            mg_dso_sym(netx_so.plibrary, "getsockname");
 
-   netx_so.p_select                = (LPFN_SELECT)                 mg_dso_sym(netx_so.plibrary, "select");
-   netx_so.p_recv                  = (LPFN_RECV)                   mg_dso_sym(netx_so.plibrary, "recv");
-   netx_so.p_send                  = (LPFN_SEND)                   mg_dso_sym(netx_so.plibrary, "send");
-   netx_so.p_shutdown              = (LPFN_SHUTDOWN)               mg_dso_sym(netx_so.plibrary, "shutdown");
-   netx_so.p_bind                  = (LPFN_BIND)                   mg_dso_sym(netx_so.plibrary, "bind");
-   netx_so.p_listen                = (LPFN_LISTEN)                 mg_dso_sym(netx_so.plibrary, "listen");
-   netx_so.p_accept                = (LPFN_ACCEPT)                 mg_dso_sym(netx_so.plibrary, "accept");
+   netx_so.p_select                = (MG_LPFN_SELECT)                 mg_dso_sym(netx_so.plibrary, "select");
+   netx_so.p_recv                  = (MG_LPFN_RECV)                   mg_dso_sym(netx_so.plibrary, "recv");
+   netx_so.p_send                  = (MG_LPFN_SEND)                   mg_dso_sym(netx_so.plibrary, "send");
+   netx_so.p_shutdown              = (MG_LPFN_SHUTDOWN)               mg_dso_sym(netx_so.plibrary, "shutdown");
+   netx_so.p_bind                  = (MG_LPFN_BIND)                   mg_dso_sym(netx_so.plibrary, "bind");
+   netx_so.p_listen                = (MG_LPFN_LISTEN)                 mg_dso_sym(netx_so.plibrary, "listen");
+   netx_so.p_accept                = (MG_LPFN_ACCEPT)                 mg_dso_sym(netx_so.plibrary, "accept");
 
    if (   (netx_so.p_WSASocket              == NULL && netx_so.winsock == 2)
        ||  netx_so.p_WSAGetLastError        == NULL
@@ -4462,10 +4738,6 @@ netx_load_winsock_no_so:
          netx_so.version_requested = MAKEWORD(1, 1);
 
       netx_so.wsastartup = NETX_WSASTARTUP(netx_so.version_requested, &(netx_so.wsadata));
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=WSAStartup(%d, %p)", netx_so.wsastartup, netx_so.version_requested, &(netx_so.wsadata));
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (netx_so.wsastartup != 0 && netx_so.winsock == 2) {
          netx_so.version_requested = MAKEWORD(2, 0);
@@ -4530,11 +4802,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
    ipv6 = 0;
 #endif
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   -> netx_tcp_connect(ip=%s, port=%d)", pcon->ip_address, pcon->port);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    strcpy(ansi_ip_address, (char *) pcon->ip_address);
 
 #if defined(_WIN32)
@@ -4575,10 +4842,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
 
          if (res) {
             NETX_FREEADDRINFO(res);
-            if (pcon->p_debug->debug == 1) {
-               fprintf(pcon->p_debug->p_fdebug, "\r\n      -> (void)<=freeaddrinfo(%p)", res);
-               fflush(pcon->p_debug->p_fdebug);
-            }
             res = NULL;
          }
 
@@ -4600,10 +4863,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
             break;
 
          n = NETX_GETADDRINFO(ansi_ip_address, port_str, &hints, &res);
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=getaddrinfo(%s, %s, %p, %p)", n, ansi_ip_address, port_str, &hints, &res);
-            fflush(pcon->p_debug->p_fdebug);
-         }
 
          if (n != 0) {
             continue;
@@ -4621,10 +4880,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
 
 	         /* Open a socket with the correct address family for this address. */
 	         pcon->cli_socket = NETX_SOCKET(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-            if (pcon->p_debug->debug == 1) {
-               fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=socket(%d, %d, %d)", (int) pcon->cli_socket, ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-               fflush(pcon->p_debug->p_fdebug);
-            }
 
             /* NETX_BIND(pcon->cli_socket, ai->ai_addr, (int) (ai->ai_addrlen)); */
             /* NETX_CONNECT(pcon->cli_socket, ai->ai_addr, (int) (ai->ai_addrlen)); */
@@ -4635,10 +4890,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
                int result;
 
                result = NETX_SETSOCKOPT(pcon->cli_socket, IPPROTO_TCP, TCP_NODELAY, (const char *) &flag, sizeof(int));
-               if (pcon->p_debug->debug == 1) {
-                  fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=setsockopt(%d, %d, %d, %p, %d)", result, (int) pcon->cli_socket, IPPROTO_TCP, TCP_NODELAY, (const char *) &flag, (int) sizeof(int));
-                  fflush(pcon->p_debug->p_fdebug);
-               }
 
                if (result < 0) {
                   strcpy(pcon->error, "Connection Error: Unable to disable the Nagle Algorithm");
@@ -4706,10 +4957,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
 
    ipv6 = 0;
    inetaddr = NETX_INET_ADDR(ansi_ip_address);
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %lu<=inet_addr(%s)", inetaddr, ansi_ip_address);
-      fflush(pcon->p_debug->p_fdebug);
-   }
 
    physical_ip = 0;
    if (isdigit(ansi_ip_address[0])) {
@@ -4733,10 +4980,7 @@ int netx_tcp_connect(DBXCON *pcon, int context)
    if (inetaddr == INADDR_NONE || !physical_ip) {
 
       hp = NETX_GETHOSTBYNAME((const char *) ansi_ip_address);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %p<=gethostbyname(%s)", hp, ansi_ip_address);
-         fflush(pcon->p_debug->p_fdebug);
-      }
+
       if (hp == NULL) {
          n = -2;
          strcpy(pcon->error, "Connection Error: Invalid Host");
@@ -4753,10 +4997,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
          spin_count ++;
 
          pcon->cli_socket = NETX_SOCKET(AF_INET, SOCK_STREAM, 0);
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=socket(%d, %d, %d)", (int) pcon->cli_socket, AF_INET, SOCK_STREAM, 0);
-            fflush(pcon->p_debug->p_fdebug);
-         }
 
          if (INVALID_SOCK(pcon->cli_socket)) {
             char message[256];
@@ -4775,19 +5015,11 @@ int netx_tcp_connect(DBXCON *pcon, int context)
 
          cli_addr.sin_family = AF_INET;
          srv_addr.sin_port = NETX_HTONS((unsigned short) pcon->port);
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=htons(%d)", (int) srv_addr.sin_port, (int) pcon->port);
-            fflush(pcon->p_debug->p_fdebug);
-         }
 
          cli_addr.sin_addr.s_addr = NETX_HTONL(INADDR_ANY);
          cli_addr.sin_port = NETX_HTONS(0);
 
          n = NETX_BIND(pcon->cli_socket, (xLPSOCKADDR) &cli_addr, sizeof(cli_addr));
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=bind(%d, %p, %lu)", n, (int) pcon->cli_socket, &cli_addr, (unsigned long) sizeof(cli_addr));
-            fflush(pcon->p_debug->p_fdebug);
-         }
 
          if (SOCK_ERROR(n)) {
             char message[256];
@@ -4813,10 +5045,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
 
          srv_addr.sin_family = AF_INET;
          srv_addr.sin_port = NETX_HTONS((unsigned short) pcon->port);
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=htons(%d)", (int) srv_addr.sin_port, (int) pcon->port);
-            fflush(pcon->p_debug->p_fdebug);
-         }
 
          NETX_MEMCPY(&srv_addr.sin_addr, *pptr, sizeof(struct in_addr));
 
@@ -4858,10 +5086,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
    else {
 
       pcon->cli_socket = NETX_SOCKET(AF_INET, SOCK_STREAM, 0);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=socket(%d, %d, %d)", (int) pcon->cli_socket, AF_INET, SOCK_STREAM, 0);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (INVALID_SOCK(pcon->cli_socket)) {
          char message[256];
@@ -4884,10 +5108,6 @@ int netx_tcp_connect(DBXCON *pcon, int context)
       cli_addr.sin_port = NETX_HTONS(0);
 
       n = NETX_BIND(pcon->cli_socket, (xLPSOCKADDR) &cli_addr, sizeof(cli_addr));
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=bind(%d, %p, %lu)", n, (int) pcon->cli_socket, &cli_addr, (unsigned long) sizeof(cli_addr));
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (SOCK_ERROR(n)) {
          char message[256];
@@ -4910,10 +5130,7 @@ int netx_tcp_connect(DBXCON *pcon, int context)
          int result;
 
          result = NETX_SETSOCKOPT(pcon->cli_socket, IPPROTO_TCP, TCP_NODELAY, (const char *) &flag, sizeof(int));
-         if (pcon->p_debug->debug == 1) {
-            fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=setsockopt(%d, %d, %d, %p, %lu)", result, (int) pcon->cli_socket, IPPROTO_TCP, TCP_NODELAY, &flag, (unsigned long) sizeof(int));
-            fflush(pcon->p_debug->p_fdebug);
-         }
+
          if (result < 0) {
             strcpy(pcon->error, "Connection Error: Unable to disable the Nagle Algorithm");
 
@@ -4962,11 +5179,11 @@ int netx_tcp_handshake(DBXCON *pcon, int context)
    len = (int) strlen(buffer);
 
    netx_tcp_write(pcon, (unsigned char *) buffer, len);
-   len = netx_tcp_read(pcon, (unsigned char *) buffer, 5, 10, 0);
+   len = netx_tcp_read(pcon, (unsigned char *) buffer, 5, pcon->timeout, 1); /* v1.2.8 */
 
    len = mg_get_size((unsigned char *) buffer);
 
-   netx_tcp_read(pcon, (unsigned char *) buffer, len, 10, 0);
+   netx_tcp_read(pcon, (unsigned char *) buffer, len, pcon->timeout, 1); /* v1.2.8 */
    if (pcon->dbtype != DBX_DBTYPE_YOTTADB) {
       isc_parse_zv(buffer, pcon->p_zv);
    }
@@ -5010,13 +5227,13 @@ int netx_tcp_command(DBXCON *pcon, int context)
    }
 
    netx_tcp_write(pcon, (unsigned char *) pcon->input_str.buf_addr, pcon->input_str.len_used);
-   netx_tcp_read(pcon, (unsigned char *) pcon->output_val.svalue.buf_addr, 5, 10, 0);
+   netx_tcp_read(pcon, (unsigned char *) pcon->output_val.svalue.buf_addr, 5, pcon->timeout, 1); /* v1.2.8 */
    pcon->output_val.svalue.buf_addr[5] = '\0';
 
    len = mg_get_size((unsigned char *) pcon->output_val.svalue.buf_addr);
 
    if (len > 0) {
-      netx_tcp_read(pcon, (unsigned char *) pcon->output_val.svalue.buf_addr + 5, len, 10, 0);
+      netx_tcp_read(pcon, (unsigned char *) pcon->output_val.svalue.buf_addr + 5, len, pcon->timeout, 1); /* v1.2.8 */
    }
 
    pcon->output_val.svalue.len_used = len;
@@ -5051,28 +5268,16 @@ int netx_tcp_connect_ex(DBXCON *pcon, xLPSOCKADDR p_srv_addr, socklen_netx srv_a
 #if defined(_WIN32)
 
       n = NETX_CONNECT(pcon->cli_socket, (xLPSOCKADDR) p_srv_addr, (socklen_netx) srv_addr_len);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=connect(%d, %p, %d)", n, (int) pcon->cli_socket, p_srv_addr, (int) srv_addr_len);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       return n;
 
 #else
       flags = fcntl(pcon->cli_socket, F_GETFL, 0);
       n = fcntl(pcon->cli_socket, F_SETFL, flags | O_NONBLOCK);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=fnctl(%d, %d, %d)", n, (int) pcon->cli_socket, F_SETFL, flags | O_NONBLOCK);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       error = 0;
 
       n = NETX_CONNECT(pcon->cli_socket, (xLPSOCKADDR) p_srv_addr, (socklen_netx) srv_addr_len);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=connect(%d, %p, %d)", n, (int) pcon->cli_socket, p_srv_addr, (int) srv_addr_len);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (n < 0) {
 
@@ -5162,16 +5367,9 @@ int netx_tcp_disconnect(DBXCON *pcon, int context)
 /*
       NETX_WSACLEANUP();
 */
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=closesocket(%d)", n, (int) pcon->cli_socket);
-         fflush(pcon->p_debug->p_fdebug);
-      }
+
 #else
       n = close(pcon->cli_socket);
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=close(%d)", n, (int) pcon->cli_socket);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 #endif
 
    }
@@ -5191,11 +5389,6 @@ int netx_tcp_write(DBXCON *pcon, unsigned char *data, int size)
 
    *errormessage = '\0';
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   -> netx_tcp_write(data=%p, size=%d)", data, size);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    if (pcon->connected == 0) {
       strcpy(pcon->error, "TCP Write Error: Socket is Closed");
       return -1;
@@ -5204,11 +5397,6 @@ int netx_tcp_write(DBXCON *pcon, unsigned char *data, int size)
    total = 0;
    for (;;) {
       n = NETX_SEND(pcon->cli_socket, (xLPSENDBUF) (data + total), size - total, 0);
-
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=send(%d, %p, %d)", n, (int) pcon->cli_socket, data + total, size - total);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (SOCK_ERROR(n)) {
 
@@ -5256,11 +5444,6 @@ int netx_tcp_read(DBXCON *pcon, unsigned char *data, int size, int timeout, int 
       return NETX_READ_ERROR;
    }
 
-   if (pcon->p_debug->debug == 1) {
-      fprintf(pcon->p_debug->p_fdebug, "\r\n   -> netx_tcp_read(data=%p, size=%d, timeout=%d)", data, size, timeout);
-      fflush(pcon->p_debug->p_fdebug);
-   }
-
    result = 0;
 
    tval.tv_sec = timeout;
@@ -5278,11 +5461,6 @@ int netx_tcp_read(DBXCON *pcon, unsigned char *data, int size, int timeout, int 
 
       n = NETX_SELECT((int) (pcon->cli_socket + 1), &rset, NULL, &eset, &tval);
 
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=select(%d, %p, %p, %p, %p{tv_sec=%d; tv_usec=%d})", n, (int) pcon->cli_socket + 1, &rset, (void *) 0, &eset, &tval, (int) tval.tv_sec, (int) tval.tv_usec);
-         fflush(pcon->p_debug->p_fdebug);
-      }
-
       if (n == 0) {
          sprintf(pcon->error, "TCP Read Error: Server did not respond within the timeout period (%d seconds)", timeout);
          result = NETX_READ_TIMEOUT;
@@ -5296,11 +5474,6 @@ int netx_tcp_read(DBXCON *pcon, unsigned char *data, int size, int timeout, int 
       }
 
       n = NETX_RECV(pcon->cli_socket, (char *) data + len, size - len, 0);
-
-      if (pcon->p_debug->debug == 1) {
-         fprintf(pcon->p_debug->p_fdebug, "\r\n      -> %d<=recv(%d, %p, %d, 0)", n, (int) pcon->cli_socket, data + len, size - len);
-         fflush(pcon->p_debug->p_fdebug);
-      }
 
       if (n < 1) {
          if (n == 0) {
@@ -5813,7 +5986,7 @@ int mg_db_command(DBXCON *pcon, int context)
    p_buf = &mgbuf;
    mg_buf_init(p_buf, MG_BUFSIZE, MG_BUFSIZE);
 
-   mg_request_header(p_srv, p_buf, pcon->command, MG_PRODUCT);
+   mg_request_header(p_srv, p_buf, pcon->command, p_srv->product);
 
    ifc[0] = 0;
    ifc[1] = MG_TX_DATA;
@@ -5916,12 +6089,12 @@ int mg_db_connect(MGSRV *p_srv, int *p_chndle, short context)
    pcon->p_ydb_so = NULL;
    pcon->p_srv = p_srv;
 
-   pcon->p_debug = &pcon->debug;
+   pcon->p_log = &pcon->log;
    pcon->p_db_mutex = &pcon->db_mutex;
    pcon->p_zv = &pcon->zv;
+   pcon->timeout = p_srv->timeout; /* v1.2.8 */
 
-   pcon->p_debug->debug = 0;
-   pcon->p_debug->p_fdebug = stdout;
+   mg_log_init(pcon->p_log);
 
    pcon->in_use = 1;
    pcon->keep_alive = 0;
@@ -5991,6 +6164,12 @@ int mg_db_send(MGSRV *p_srv, int chndle, MGBUF *p_buf, int mode)
 
    result = 1;
 
+   if (p_srv->p_log && p_srv->p_log->log_transmissions) {
+      char buffer[64];
+      sprintf(buffer, "Transmission: Send to Host (size=%lu)", p_buf->data_size);
+      mg_log_buffer(p_srv->p_log, p_buf->p_buffer, p_buf->data_size, buffer, 0);
+   }
+
    if (mode) {
       len = mg_encode_size(esize, p_buf->data_size - p_srv->header_len, MG_CHUNK_SIZE_BASE);
       strncpy((char *) (p_buf->p_buffer + (p_srv->header_len - 6) + (5 - len)), (char *) esize, len);
@@ -6038,38 +6217,13 @@ int mg_db_receive(MGSRV *p_srv, int chndle, MGBUF *p_buf, int size, int mode)
    unsigned long len, total, ssize;
    char s_buffer[16], stype[4];
    char *p;
+   fd_set rset, eset;
+   struct timeval tval;
    DBXCON *pcon;
+   unsigned long spin_count;
 
    if (p_srv->mode == 2) {
-#if defined(MG_GTM)
-      char *output;
-      gtm_char_t      msgbuf[256];
-      gtm_status_t    status;
-
-      output = mg_malloc(MG_BUFSIZE);
-      *output = '\0';
-
-      status = (gtm_status_t) mg_gtm_ci("m_gtm_ifc", output, 0, p_buf->p_buffer, "", "", "", "", "");
-      strcpy(p_buf->p_buffer, output);
-      mg_free((void *) output);
-      p_buf->data_size = (int) strlen(p_buf->p_buffer);
-
-      if (status != 0) {
-         mg_gtm_zstatus(msgbuf, 256);
-
-         sprintf(p_buf->p_buffer, "00000ce\n%s", msgbuf);
-         p_buf->data_size = (int) strlen(p_buf->p_buffer);
-
-         strcpy(p_srv->error_mess, msgbuf);
-         result = 0;
-      }
-      else {
-         result = p_buf->data_size;
-      }
-#else
-      result = 0;
-#endif
-      return result;
+      return mg_invoke_server_api(p_srv, chndle, p_buf, size, mode);
    }
 
    pcon = p_srv->pcon[chndle];
@@ -6080,6 +6234,11 @@ int mg_db_receive(MGSRV *p_srv, int chndle, MGBUF *p_buf, int size, int mode)
    s_buffer[0] = '\0';
    p_buf->p_buffer[0] = '\0';
    p_buf->data_size = 0;
+
+   /* v1.2.8 */
+   pcon->timeout = p_srv->timeout;
+   tval.tv_sec = pcon->timeout;
+   tval.tv_usec = 0;
 
    if (pcon->eod) {
       pcon->eod = 0;
@@ -6094,7 +6253,32 @@ int mg_db_receive(MGSRV *p_srv, int chndle, MGBUF *p_buf, int size, int mode)
    else
       total = p_buf->size;
 
+   spin_count = 0;
    for (;;) {
+      spin_count ++;
+
+      if (pcon->timeout) {
+         FD_ZERO(&rset);
+         FD_ZERO(&eset);
+         FD_SET(pcon->cli_socket, &rset);
+         FD_SET(pcon->cli_socket, &eset);
+
+         n = NETX_SELECT((int) (pcon->cli_socket + 1), &rset, NULL, &eset, &tval);
+
+         if (n == 0) {
+            sprintf(pcon->error, "TCP Read Error: Server did not respond within the timeout period (%d seconds)", pcon->timeout);
+            result = NETX_READ_TIMEOUT;
+            pcon->eod = 1;
+            break;
+         }
+
+         if (n < 0 || !NETX_FD_ISSET(pcon->cli_socket, &rset)) {
+            strcpy(pcon->error, "TCP Read Error: Server closed the connection without having returned any data");
+            result = NETX_READ_ERROR;
+            pcon->eod = 1;
+            break;
+         }
+      }
 
       n = NETX_RECV(pcon->cli_socket, p_buf->p_buffer + len, total - len, 0);
 
@@ -6139,6 +6323,12 @@ int mg_db_receive(MGSRV *p_srv, int chndle, MGBUF *p_buf, int size, int mode)
          break;
       }
 
+   }
+
+   if (p_srv->p_log && p_srv->p_log->log_transmissions) {
+      char buffer[64];
+      sprintf(buffer, "Transmission: Received from Host (size=%lu)", p_buf->data_size);
+      mg_log_buffer(p_srv->p_log, p_buf->p_buffer, p_buf->data_size, buffer, 0);
    }
 
    return result;
@@ -6593,7 +6783,6 @@ int mg_compare_keys(MGSTR * key, MGSTR * rkey, int max)
 }
 
 
-
 int mg_replace_substrings(char * tbuffer, char *fbuffer, char * replace, char * with)
 {
    int len, wlen, rlen;
@@ -6623,152 +6812,64 @@ int mg_replace_substrings(char * tbuffer, char *fbuffer, char * replace, char * 
 }
 
 
-int mg_load_gtm_library(MGSRV *p_srv, short context)
+int mg_bind_server_api(MGSRV *p_srv, short context)
 {
-   int result;
-   char *gtm_dist, *p;
-   char buffer[256], path1[256], path2[256];
-
-   result = 0;
-
-   gtm_dist = NULL;
-   p = NULL;
-   *buffer = '\0';
-   *path1 = '\0';
-   *path2 = '\0';
-   *(p_srv->error_mess) = '\0';
-   *(p_srv->info) = '\0';
-
-#if defined(MG_GTM)
-
-   mg_gtm.gtm = 0;
-   mg_gtm.gtmshr.flags = 0;
-
-   /* Try to Load the GT.M library */
-
-#if defined(_WIN32)
-
-   result = 0;
-
-#else
-
-   result = 0;
-
-   gtm_dist = strstr(p_srv->p_env->p_buffer, "gtm_dist=");
-   if (gtm_dist) {
-      gtm_dist += 9;
-      p = strstr(gtm_dist, "\n");
-      if (p) {
-         *p = '\0';
-         strcpy(path2, gtm_dist);
-         *p = '\n';
-      }
-   }
-
-   sprintf(path1, "%s/libgtmshr.so", path2);
-   mg_gtm.p_library = mg_dso_load(path1);
-   if (!mg_gtm.p_library) {
-      sprintf(path1, "%s/libgtmshr.sl", path2);
-      mg_gtm.p_library = mg_dso_load(path1);
-      if (!mg_gtm.p_library) {
-         sprintf(path1, "%s/libgtmshr.dylib", path2);
-         mg_gtm.p_library = mg_dso_load(path1);
-      }
-   }
-
-   if (!mg_gtm.p_library) {
-      strcpy(path1, "libgtmshr.so");
-      mg_gtm.p_library = mg_dso_load(path1);
-      if (!mg_gtm.p_library) {
-         strcpy(path1, "libgtmshr.sl");
-         result = mg_dso_load(path1);
-         if (!mg_gtm.p_library) {
-            strcpy(path1, "libgtmshr.dylib");
-            mg_gtm.p_library = mg_dso_load(path1);
-         }
-      }
-   }
-
-
-   if (!mg_gtm.p_library) {
-      strcpy(p_srv->error_mess, "mg_python: Initialization: Information: The GT.M library (libgtmshr) is not available on this system");
-      goto gtm_init_end;
-   }
-
-   mg_gtm.p_gtm_ci = (LPFN_GTM_CI) mg_dso_sym(mg_gtm.p_library, "gtm_ci");
-   if (!mg_gtm.p_gtm_ci) {
-      strcpy(buffer,  "gtm_ci");
-      goto gtm_init_end;
-   }
-   mg_gtm.p_gtm_init = (LPFN_GTM_INIT) mg_dso_sym(mg_gtm.p_library, "gtm_init");
-   if (!mg_gtm.p_gtm_init) {
-      strcpy(buffer,  "gtm_init");
-      goto gtm_init_end;
-   }
-   mg_gtm.p_gtm_exit = (LPFN_GTM_EXIT) mg_dso_sym(mg_gtm.p_library, "gtm_exit");
-   if (!mg_gtm.p_gtm_exit) {
-      strcpy(buffer,  "gtm_exit");
-      goto gtm_init_end;
-   }
-   mg_gtm.p_gtm_zstatus = (LPFN_GTM_ZSTATUS) mg_dso_sym(mg_gtm.p_library, "gtm_zstatus");
-   if (!mg_gtm.p_gtm_zstatus) {
-      strcpy(buffer,  "gtm_zstatus");
-      goto gtm_init_end;
-   }
-
-   result = 1;
-
-gtm_init_end:
-
-#endif /* #if defined(_WIN32) */
-
-   if (result) {
-      mg_gtm.gtm = 1;
-      sprintf(p_srv->info, "mg_python: Initialization: The GT.M library (%s) is loaded", path1);
-   }
-   else {
-
-      if (strlen(buffer)) {
-         sprintf(p_srv->error_mess, "mg_python: Initialization: Information: The GT.M library (%s) found on this system is not usable - missing '%s' function", path1, buffer);
-      }
-
-   }
-
-   mg_gtm.load_attempted = 1;
-
-#endif /* #if defined(MG_GTM) */
-
-   if (*(p_srv->error_mess))
-      result = 0;
-   else
-      result = 1;
-
-   return result;
-
-}
-
-
-int mg_unload_gtm_library(MGSRV *p_srv, short context)
-{
-
-#if defined(MG_GTM)
-   mg_dso_unload(mg_gtm.p_library);
-#endif
-
-   return 1;
-}
-
-
-int mg_bind_gtm_server(MGSRV *p_srv, short context)
-{
-   int result;
+   int rc, chndle, result;
    char *p, *p1, *p2;
-#if defined(MG_GTM)
-   gtm_status_t status;
-   gtm_char_t msgbuf[256];
+   char buffer[256];
+   DBXCON *pcon;
+
+   chndle = 0;
+   result = 0;
+
+   if (!p_srv->pcon[chndle]) {
+      p_srv->pcon[chndle] = (DBXCON *) mg_malloc(sizeof(DBXCON), 0);
+      memset(p_srv->pcon[chndle], 0, sizeof(DBXCON));
+      p_srv->pcon[chndle]->chndle = chndle;
+   }
+
+   pcon = p_srv->pcon[chndle];
+
+   p_srv->mode = 2;
+   pcon->p_srv = (void *) p_srv;
+   pcon->p_log = &pcon->log;
+   pcon->p_db_mutex = &pcon->db_mutex;
+   mg_mutex_create(pcon->p_db_mutex);
+   pcon->p_zv = &pcon->zv;
+
+   mg_log_init(pcon->p_log);
+
+#if defined(MG_DBA_DSO)
+   strcpy(pcon->p_log->product, MG_LOG_FILE);
+   strcpy(pcon->p_log->product, MG_PRODUCT);
 #endif
 
-   result = 0;
+   strcpy(pcon->p_log->product_version, DBX_VERSION);
+
+   strcpy(buffer, p_srv->dbtype_name);
+   mg_lcase(buffer);
+
+   pcon->dbtype = 0;
+   if (!strcmp(buffer, "cache"))
+      pcon->dbtype = DBX_DBTYPE_CACHE;
+   else if (!strcmp(buffer, "iris"))
+      pcon->dbtype = DBX_DBTYPE_IRIS;
+   else if (!strcmp(buffer, "yottadb"))
+      pcon->dbtype = DBX_DBTYPE_YOTTADB;
+   else if (!strcmp(buffer, "gtm") || !strcmp(buffer, "gt.m"))
+      pcon->dbtype = DBX_DBTYPE_GTM;
+
+   if (!pcon->dbtype) {
+      strcpy(p_srv->error_mess, "Unrecognised Server Type");
+      return 0;
+   }
+
+   strcpy(pcon->shdir, p_srv->shdir);
+   strcpy(pcon->username, p_srv->username);
+   strcpy(pcon->password, p_srv->password);
+   strcpy(pcon->nspace, p_srv->uci);
+   pcon->input_device[0] = '\0';
+   pcon->output_device[0] = '\0';
 
    p = (char *) p_srv->p_env->p_buffer;
    p2 = p;
@@ -6793,53 +6894,245 @@ int mg_bind_gtm_server(MGSRV *p_srv, short context)
       p = p2 + 1;
    }
 
-#if defined(MG_GTM)
-   result = mg_load_gtm_library(p_srv, 0);
-   if (result) {
-      status = (gtm_status_t) mg_gtm_init();
-
-      if (status != 0) {
-         mg_gtm_zstatus(msgbuf, 256);
-         strcpy(p_srv->error_mess, msgbuf);
-         mg_unload_gtm_library(p_srv, 0);
-         result = 0;
-      }
-      else {
-         p_page->mode = 2;
-         result = 1;
-      }
+   if (!pcon->shdir[0]) {
+      strcpy(pcon->error, "Unable to determine the path to the database installation");
+      rc = CACHE_NOCON;
+      goto mg_bind_server_api_exit;
    }
-#endif
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      rc = ydb_open(pcon);
+   }
+   else if (pcon->dbtype == DBX_DBTYPE_GTM) {
+      rc = gtm_open(pcon);
+   }
+   else {
+      rc = isc_open(pcon);
+   }
+
+mg_bind_server_api_exit:
+
+   if (rc == CACHE_SUCCESS) {
+      pcon->connected = 1;
+      result = 1;
+   }
+   else {
+      pcon->connected = 0;
+      result = 0;
+      strcpy(p_srv->error_mess, pcon->error);
+   }
 
    return result;
+
 }
 
 
-int mg_exit_gtm_server(MGSRV *p_srv, short context)
+int mg_release_server_api(MGSRV *p_srv, short context)
 {
-   int result;
-#if defined(MG_GTM)
-   gtm_status_t status;
-   gtm_char_t msgbuf[256];
-#endif
+   int result, chndle, rc, rc1;
+   char buffer[256];
+   DBXCON *pcon;
+
+   result = 1;
+   chndle = 0;
+
+   pcon = p_srv->pcon[chndle];
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      if (pcon->p_ydb_so->loaded) {
+         rc = pcon->p_ydb_so->p_ydb_exit();
+         /* printf("\r\np_ydb_exit=%d\r\n", rc); */
+      }
+
+      strcpy(pcon->error, "");
+/*
+      mg_dso_unload(pcon->p_ydb_so->p_library); 
+      pcon->p_ydb_so->p_library = NULL;
+      pcon->p_ydb_so->loaded = 0;
+*/
+      strcpy(pcon->p_ydb_so->libdir, "");
+      strcpy(pcon->p_ydb_so->libnam, "");
+
+   }
+   else if (pcon->dbtype == DBX_DBTYPE_GTM) {
+      if (pcon->p_gtm_so->loaded) {
+         rc = (int) pcon->p_gtm_so->p_gtm_exit();
+         /* printf("\r\np_gtm_exit=%d\r\n", rc); */
+         if (rc != 0) {
+            pcon->p_gtm_so->p_gtm_zstatus(buffer, 255);
+            strcpy(p_srv->error_mess, buffer);
+            result = 0;
+         }
+      }
+
+      strcpy(pcon->error, "");
+/*
+      mg_dso_unload(pcon->p_gtm_so->p_library); 
+      pcon->p_gtm_so->p_library = NULL;
+      pcon->p_gtm_so->loaded = 0;
+*/
+      strcpy(pcon->p_gtm_so->libdir, "");
+      strcpy(pcon->p_gtm_so->libnam, "");
+   }
+   else {
+      if (pcon->p_isc_so->loaded) {
+
+         DBX_LOCK(rc, 0);
+
+         rc = pcon->p_isc_so->p_CacheEnd();
+         rc1 = rc;
+
+         DBX_UNLOCK(rc);
+
+      }
+
+      strcpy(pcon->error, "");
+
+      mg_dso_unload(pcon->p_isc_so->p_library); 
+
+      pcon->p_isc_so->p_library = NULL;
+      pcon->p_isc_so->loaded = 0;
+
+      strcpy(pcon->p_isc_so->libdir, "");
+      strcpy(pcon->p_isc_so->libnam, "");
+   }
+
+   return result;
+
+}
+
+
+int mg_invoke_server_api(MGSRV *p_srv, int chndle, MGBUF *p_buf, int size, int mode)
+{
+   int result, rc, rc1, ne, ex;
+   unsigned int n, max, len;
+   char *outstr8;
+   char buffer[256];
+   DBXFUN fun, *pfun;
+   DBXCON *pcon;
+   CACHE_EXSTR zstr;
 
    result = 0;
+   chndle = 0;
 
-#if defined(MG_GTM)
-   if (p_srv->mode == 2) {
-      status = (gtm_status_t) mg_gtm_exit();
-      if (status != 0) {
-         mg_gtm_zstatus(msgbuf, 256);
-         strcpy(p_srv->error_mess, msgbuf);
+   pcon = p_srv->pcon[chndle];
+   pfun = &fun;
+
+   if (pcon->dbtype == DBX_DBTYPE_YOTTADB) {
+      if (!pcon->p_ydb_so->loaded || !pcon->p_ydb_so || !pcon->p_ydb_so->p_ydb_ci) {
          result = 0;
+         strcpy(p_srv->error_mess, "YottaDB server API not bound");
+         goto mg_invoke_server_api_exit;
+      }
+      pfun->rflag = 0;
+      pfun->label = "ifc_zmgsis";
+      pfun->label_len = 10;
+      pfun->routine = "";
+      pfun->routine_len = 0;
+      pcon->argc = 3;
+
+      rc = pcon->p_ydb_so->p_ydb_ci(pfun->label, p_buf->p_buffer, "0", p_buf->p_buffer, "");
+      p_buf->data_size = (unsigned long) strlen(p_buf->p_buffer);
+      result = 1;
+   }
+   else if (pcon->dbtype == DBX_DBTYPE_GTM) {
+      if (!pcon->p_gtm_so->loaded || !pcon->p_gtm_so || !pcon->p_gtm_so->p_gtm_ci) {
+         result = 0;
+         strcpy(p_srv->error_mess, "GT.M server API not bound");
+         goto mg_invoke_server_api_exit;
+      }
+      pfun->rflag = 0;
+      pfun->label = "ifc_zmgsis";
+      pfun->label_len = 10;
+      pfun->routine = "";
+      pfun->routine_len = 0;
+      pcon->argc = 3;
+
+      rc = (int) pcon->p_gtm_so->p_gtm_ci(pfun->label, p_buf->p_buffer, "0", p_buf->p_buffer, "");
+      if (rc != 0) {
+         pcon->p_gtm_so->p_gtm_zstatus(buffer, 255);
+         strcpy(p_srv->error_mess, buffer);
+         result = 0;
+         goto mg_invoke_server_api_exit;
+      }
+
+      p_buf->data_size = (unsigned long) strlen(p_buf->p_buffer);
+      result = 1;
+   }
+   else {
+      if (!pcon->p_isc_so->loaded || !pcon->p_isc_so || !pcon->p_isc_so->p_CachePushFunc) {
+         result = 0;
+         strcpy(p_srv->error_mess, "InterSystems server API not bound");
+         goto mg_invoke_server_api_exit;
+      }
+      ex = 1;
+      zstr.len = 0;
+      zstr.str.ch = NULL;
+      outstr8 = NULL;
+
+      pfun->rflag = 0;
+      pfun->label = "ifc";
+      pfun->label_len = 3;
+      pfun->routine = "%zmgsis";
+      pfun->routine_len = 7;
+      pcon->argc = 3;
+      rc = pcon->p_isc_so->p_CachePushFunc(&(pfun->rflag), (int) pfun->label_len, (const Callin_char_t *) pfun->label, (int) pfun->routine_len, (const Callin_char_t *) pfun->routine);
+
+      rc1 = 0;
+      rc = pcon->p_isc_so->p_CachePushInt(rc1);
+
+      if (p_buf->data_size < DBX_MAXSIZE) {
+         rc = pcon->p_isc_so->p_CachePushStr(p_buf->data_size, (Callin_char_t *) p_buf->p_buffer);
       }
       else {
+         pcon->args[0].cvalue.pstr = (void *) pcon->p_isc_so->p_CacheExStrNew((CACHE_EXSTRP) &(pcon->args[0].cvalue.zstr), p_buf->data_size + 1);
+         for (ne = 0; ne < (int) p_buf->data_size; ne ++) {
+            pcon->args[0].cvalue.zstr.str.ch[ne] = (char) p_buf->p_buffer[ne];
+         }
+         pcon->args[0].cvalue.zstr.str.ch[ne] = (char) 0;
+         pcon->args[0].cvalue.zstr.len = p_buf->data_size;
+         rc = pcon->p_isc_so->p_CachePushExStr((CACHE_EXSTRP) &(pcon->args[0].cvalue.zstr));
+      }
+      *buffer = '\0';
+      rc = pcon->p_isc_so->p_CachePushStr(0, (Callin_char_t *) buffer);
+      rc = pcon->p_isc_so->p_CacheExtFun(pfun->rflag, pcon->argc);
+
+      if (rc == CACHE_SUCCESS) {
+         if (ex) {
+            rc = pcon->p_isc_so->p_CachePopExStr(&zstr);
+            len = zstr.len;
+            outstr8 = (char *) zstr.str.ch;
+         }
+         else {
+            rc = pcon->p_isc_so->p_CachePopStr((int *) &len, (Callin_char_t **) &outstr8);
+         }
+         max = p_buf->size - 1;
+         for (n = 0; n < len; n ++) {
+            if (n > max)
+               break;
+            p_buf->p_buffer[n] = (char) outstr8[n];
+         }
+         p_buf->p_buffer[n] = '\0';
+         p_buf->data_size = len;
+
+         if (ex) {
+            rc1 = pcon->p_isc_so->p_CacheExStrKill(&zstr);
+         }
          result = 1;
       }
-
-      mg_unload_gtm_library(p_srv, 0);
+      else {
+         result = 0;
+         strcpy(p_srv->error_mess, "InterSystems server error - unable to invoke function");
+         goto mg_invoke_server_api_exit;
+      }
    }
-#endif
+
+mg_invoke_server_api_exit:
+
+   if (!result) {
+      sprintf(p_buf->p_buffer, "00000ce\n%s", buffer);
+      p_buf->data_size = (int) strlen(p_buf->p_buffer);
+   }
 
    return result;
 }
