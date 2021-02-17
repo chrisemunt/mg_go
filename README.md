@@ -3,21 +3,22 @@
 A GO Extension for InterSystems **Cache/IRIS** and **YottaDB**.
 
 Chris Munt <cmunt@mgateway.com>  
-11 January 2021, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
+17 February 2021, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
 
 
-* Current Release: Version: 1.1; Revision 2a (11 January 2021).
+* Current Release: Version: 1.2; Revision 3.
 * Two connectivity models to the InterSystems or YottaDB database are provided: High performance via the local database API or network based.
 * [Release Notes](#RelNotes) can be found at the end of this document.
 
 Contents
 
-* [Overview](#Overview") 
-* [Pre-requisites](#PreReq") 
+* [Overview](#Overview")
+* [Pre-requisites](#PreReq")
 * [Installing mg\_go](#Install)
 * [Connecting to the database](#Connect)
 * [Invocation of database commands](#DBCommands)
 * [Invocation of database functions](#DBFunctions)
+* [Transaction Processing](#TProcessing)
 * [Direct access to InterSystems classes (IRIS and Cache)](#DBClasses)
 * [License](#License)
 
@@ -28,7 +29,7 @@ Contents
 
 The **mg\_go** extension connects to these databases using their high performance C-based APIs. There is also the option of connecting to the database over the network.
 
-## <a name="PreReq"></a> Pre-requisites 
+## <a name="PreReq"></a> Pre-requisites
 
 **Go** installation:
 
@@ -63,9 +64,9 @@ Install the GO extension (essentially a GO package) in your GO source directory.
 
 In this directory you will find **mg.go.unix** and **mg.go.windows**.  Rename the appropriate one for your OS as **mg.go**
 
-### Installing the M support routines
+### Installing DB Superserver
 
-The M support routines are required for:
+The DB Superserver is required for:
 
 * Network based access to databases.
 
@@ -82,7 +83,7 @@ Change to your development UCI and check the installation:
        do ^%zmgsi
 
        M/Gateway Developments Ltd - Service Integration Gateway
-       Version: 3.6; Revision 15 (6 November 2020)
+       Version: 4.0; Revision 16 (11 February 2021)
 
 
 #### Installation for YottaDB
@@ -111,73 +112,26 @@ Link all the **zmgsi** routines and check the installation:
        do ^%zmgsi
 
        M/Gateway Developments Ltd - Service Integration Gateway
-       Version: 3.6; Revision 15 (6 November 2020)
+       Version: 4.0; Revision 16 (11 February 2021)
 
 Note that the version of **zmgsi** is successfully displayed.
 
 
-### Setting up the network service (for network based connectivity only)
+### Starting the DB Superserver
 
 The default TCP server port for **zmgsi** is **7041**.  If you wish to use an alternative port then modify the following instructions accordingly.
 
-#### InterSystems Cache/IRIS
+* For InterSystems DB servers the concurrent TCP service should be started in the **%SYS** Namespace.
 
-Start the Cache/IRIS-hosted concurrent TCP service in the Manager UCI:
+Start the DB Superserver using the following command:
 
        do start^%zmgsi(0) 
 
 To use a server TCP port other than 7041, specify it in the start-up command (as opposed to using zero to indicate the default port of 7041).
 
-#### YottaDB
+* For YottaDB, as an alternative to starting the DB Superserver from the command prompt, Superserver processes can be started via the **xinetd** daemon.  Instructions for configuring this option can be found in the **mgsi** repository [here](https://github.com/chrisemunt/mgsi)
 
-Network connectivity to **YottaDB** is managed via the **xinetd** service.  First create the following launch script (called **zmgsi\_ydb** here):
-
-       /usr/local/lib/yottadb/r130/zmgsi_ydb
-
-Content:
-
-       #!/bin/bash
-       cd /usr/local/lib/yottadb/r130
-       export ydb_dir=/root/.yottadb
-       export ydb_dist=/usr/local/lib/yottadb/r130
-       export ydb_routines="/root/.yottadb/r1.30_x86_64/o*(/root/.yottadb/r1.30_x86_64/r /root/.yottadb/r) /usr/local/lib/yottadb/r130/libyottadbutil.so"
-       export ydb_gbldir="/root/.yottadb/r1.30_x86_64/g/yottadb.gld"
-       $ydb_dist/ydb -r xinetd^%zmgsis
-
-Note that you should, if necessary, modify the permissions on this file so that it is executable.  For example:
-
-       chmod a=rx /usr/local/lib/yottadb/r130/zmgsi_ydb
-
-Create the **xinetd** script (called **zmgsi\_xinetd** here): 
-
-       /etc/xinetd.d/zmgsi_xinetd
-
-Content:
-
-       service zmgsi_xinetd
-       {
-            disable         = no
-            type            = UNLISTED
-            port            = 7041
-            socket_type     = stream
-            wait            = no
-            user            = root
-            server          = /usr/local/lib/yottadb/r130/zmgsi_ydb
-       }
-
-* Note: sample copies of **zmgsi\_xinetd** and **zmgsi\_ydb** are included in the **/unix** directory of the **mgsi** GitHub repository [here](https://github.com/chrisemunt/mgsi).
-
-Edit the services file:
-
-       /etc/services
-
-Add the following line to this file:
-
-       zmgsi_xinetd          7041/tcp                        # zmgsi
-
-Finally restart the **xinetd** service:
-
-       /etc/init.d/xinetd restart
+GO code using the **mg\_go** functions will, by default, expect the database server to be listening on port **7041** of the local server (localhost).  However, **mg\_go** provides the functionality to modify these default settings at run-time.  It is not necessary for the GO installation to reside on the same host as the database server.
 
 
 ## <a name="Connect"></a> Connecting to the database
@@ -191,9 +145,11 @@ To use the **mg\_go** extension you should include it in the list of packages re
           "mg_go"
        )
 
+
 ### Open a connection to the database (API based connectivity)
 
 In the following examples, modify all paths (and any user names and passwords) to match those of your own installation.
+
 
 #### InterSystems Cache
 
@@ -207,6 +163,7 @@ Assuming Cache is installed under **/opt/cache20181/**
            db.Namespace = "USER"
        result := db.Open()
 
+
 #### InterSystems IRIS
 
 Assuming IRIS is installed under **/opt/IRIS20181/**
@@ -218,6 +175,7 @@ Assuming IRIS is installed under **/opt/IRIS20181/**
            db.Password = "SYS"
            db.Namespace = "USER"
        result := db.Open()
+
 
 #### YottaDB
 
@@ -234,6 +192,7 @@ Assuming an 'out of the box' YottaDB installation under **/usr/local/lib/yottadb
            db.EnvVars = db.EnvVars + "\n"
        result := db.Open()
 
+
 ### Open a connection to the database (Network based connectivity)
 
 Assuming the server (**Cache** in this example) is listening on port **7041** on host **localhost**
@@ -246,6 +205,7 @@ Assuming the server (**Cache** in this example) is listening on port **7041** on
            db.Password = "SYS"
            db.Namespace = "USER"
        result := db.Open()
+
 
 #### Connecting to the database via the MGWSI Service Integration Gateway
 
@@ -262,6 +222,29 @@ Assuming the **MGWSI** Gateway is listening on port **7040** on host **localhost
            db.Password = "SYS"
            db.Namespace = "USER"
        result := db.Open()
+
+### Additional database properties that can be set before opening a connection
+
+### Setting the DB Server Response Timeout
+
+       db.Timeout := <time in seconds>
+
+This setting applies to network based connectivity to the DB Server.  The default value is 30 seconds.
+
+Example: set timeout to 60 seconds:
+
+       db.Timeout := 60
+
+
+### Setting the DB Server input buffer size
+
+       db.InputBufferSize = <size in Bytes>
+
+The buffer size must be large enough to hold the maximum size of the request or response data from the DB Server.  The default value is 32767 Bytes.  However for newer InterSystems databases the maximum string size can be up to 3,641,144 Bytes.
+
+Example: set the buffer size to the maximum allowed for InterSytems databases:
+
+       db.Timeout := 3641144
 
 
 ### Return the version of mg\_go
@@ -394,6 +377,56 @@ Go invocation:
       fmt.Printf("\nFunction result: %v\n", fr)
 
 
+## <a name="TProcessing"></a> Transaction Processing
+
+M DB Servers implement Transaction Processing by means of the methods described in this section.
+
+* With YottaDB, these methods are only available over network based connectivity to the DB Server.
+
+### Start a Transaction
+
+       result := db.TStart()
+
+* On successful completion this method will return zero, or an error code on failure.
+
+Example:
+
+       result := db.TStart()
+
+
+### Determine the Transaction Level
+
+       tlevel := db.TLevel()
+
+* Transactions can be nested and this method will return the level of nesting.  If no Transaction is active this method will return zero.  Otherwise a positive integer will be returned to represent the current depth of Transaction nesting.
+
+Example:
+
+       result := db.TLevel()
+
+
+### Commit a Transaction
+
+       result := db.TCommit()
+
+* On successful completion this method will return zero, or an error code on failure.
+
+Example:
+
+       result := db.TCommit()
+
+
+### Rollback a Transaction
+
+       result := db.TRollback()
+
+* On successful completion this method will return zero, or an error code on failure.
+
+Example:
+
+       result := db.TRollback()
+
+
 ## <a name="DBClasses"> Direct access to InterSystems classes (IRIS and Cache)
 
 To illustrate these methods, the following simple class will be used:
@@ -496,3 +529,12 @@ Unless required by applicable law or agreed to in writing, software distributed 
 
 * Verify that **mg\_go** works with the latest version of Go: 1.15.6
 * Restructure the documentation.
+
+### v1.2.3 (17 February 2021)
+
+* Introduce support for M transaction processing: tstart, $tlevel, tcommit, trollback.
+* Allow the DB server response timeout to be modified via the db.Timeout property.
+	* db.Timeout = [timeout]
+* Allow the input buffer size to be modified via the db.InputBufferSize property.
+	* db.InputBufferSize = [size]
+* Improved exception handling for DB connectivity errors.
