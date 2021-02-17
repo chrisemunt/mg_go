@@ -347,7 +347,7 @@ Example:
 
        id = ""
        for r := person.Previous(id); r.OK; r = person.Previous(id) {
-       id = r.Data.(string)
+          id = r.Data.(string)
           fmt.Printf("\nPerson ID: %s, Name: %s", id, person.Get(id).Data.(string))
        }
 
