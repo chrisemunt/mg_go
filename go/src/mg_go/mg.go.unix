@@ -143,6 +143,7 @@ type Database struct {
    index int
    inputbuffer []byte
    Cinputbuffer unsafe.Pointer
+   open int
 }
 
 // Global
@@ -217,6 +218,7 @@ func New(Type string) Database {
    db.Timeout = 0;
 
    db.InputBufferSize = DBX_INPUT_BUFFER_SIZE
+   db.open = 0
 
    return *db
 }
@@ -253,8 +255,12 @@ func (db *Database) Open() Result {
       return dba_error("Open")
    }
 
+   if (db.InputBufferSize < DBX_INPUT_BUFFER_SIZE) {
+      db.InputBufferSize = DBX_INPUT_BUFFER_SIZE
+   }
    db.Cinputbuffer = C.malloc(C.size_t(db.InputBufferSize))
    db.inputbuffer = (*[1 << 30]byte)(unsafe.Pointer(db.Cinputbuffer))[:]
+   db.open = 1
 
    buffer_len := 0;
 
@@ -289,7 +295,7 @@ func (db *Database) Open() Result {
 
 // Close a connection to the database
 func (db *Database) Close() Result {
-   if (pf_close == nil) {
+   if (pf_close == nil || db.open == 0) {
       return dba_error("Close")
    }
    buffer_len := 0;
@@ -311,7 +317,7 @@ func (db *Database) Close() Result {
 
 // Get current namespace
 func (db *Database) GetNamespace() Result {
-   if (pf_getnamespace == nil) {
+   if (pf_getnamespace == nil || db.open == 0) {
       return dba_error("GetNamespace")
    }
    buffer_len := 0;
@@ -333,7 +339,7 @@ func (db *Database) GetNamespace() Result {
 
 // Set current namespace
 func (db *Database) SetNamespace(Namespace string) Result {
-   if (pf_setnamespace == nil) {
+   if (pf_setnamespace == nil || db.open == 0) {
       return dba_error("SetNamespace")
    }
    buffer_len := 0;
@@ -386,7 +392,7 @@ func (g *Global) Reference(args ... interface{}) int {
 
 // Set a Global data node
 func (g *Global) Set(args ... interface{}) Result {
-   if (pf_set == nil) {
+   if (pf_set == nil || g.db.open == 0) {
       return dba_error("Set")
    }
    buffer_len := g.Reference()
@@ -407,7 +413,7 @@ func (g *Global) Set(args ... interface{}) Result {
 
 // Get a Global data node
 func (g *Global) Get(args ... interface{}) Result {
-   if (pf_get == nil) {
+   if (pf_get == nil || g.db.open == 0) {
       return dba_error("Get")
    }
    buffer_len := g.Reference()
@@ -427,7 +433,7 @@ func (g *Global) Get(args ... interface{}) Result {
 
 // Get the next key element for a Global ($Order) 
 func (g *Global) Next(args ... interface{}) Result {
-   if (pf_next == nil) {
+   if (pf_next == nil || g.db.open == 0) {
       return dba_error("Next")
    }
    buffer_len := g.Reference()
@@ -454,7 +460,7 @@ func (g *Global) Next(args ... interface{}) Result {
 
 // Get the previous key element for a Global (Reverse $Order)
 func (g *Global) Previous(args ... interface{}) Result {
-   if (pf_previous == nil) {
+   if (pf_previous == nil || g.db.open == 0) {
       return dba_error("Previous")
    }
    buffer_len := g.Reference()
@@ -481,7 +487,7 @@ func (g *Global) Previous(args ... interface{}) Result {
 
 // Delete a Global reference (and all descendants)
 func (g *Global) Delete(args ... interface{}) Result {
-   if (pf_delete == nil) {
+   if (pf_delete == nil || g.db.open == 0) {
       return dba_error("Delete")
    }
    buffer_len := g.Reference()
@@ -502,7 +508,7 @@ func (g *Global) Delete(args ... interface{}) Result {
 
 // Test that a Global reference exists ($Data)
 func (g *Global) Defined(args ... interface{}) Result {
-   if (pf_defined == nil) {
+   if (pf_defined == nil || g.db.open == 0) {
       return dba_error("Defined")
    }
    buffer_len := g.Reference()
@@ -523,7 +529,7 @@ func (g *Global) Defined(args ... interface{}) Result {
 
 // Increment a global node
 func (g *Global) Increment(args ... interface{}) Result {
-   if (pf_increment == nil) {
+   if (pf_increment == nil || g.db.open == 0) {
       return dba_error("Increment")
    }
    buffer_len := g.Reference()
@@ -544,7 +550,7 @@ func (g *Global) Increment(args ... interface{}) Result {
 
 // Invoke a database function
 func (db *Database) Function(args ... interface{}) Result {
-   if (pf_function == nil) {
+   if (pf_function == nil || db.open == 0) {
       return dba_error("Function")
    }
    buffer_len := 0;
@@ -570,7 +576,7 @@ func (db *Database) Function(args ... interface{}) Result {
 
 // Transaction Start
 func (db *Database) TStart(args ... interface{}) Result {
-   if (pf_tstart == nil) {
+   if (pf_tstart == nil || db.open == 0) {
       return dba_error("TStart")
    }
    buffer_len := 0;
@@ -596,7 +602,7 @@ func (db *Database) TStart(args ... interface{}) Result {
 
 // Transaction Level
 func (db *Database) TLevel(args ... interface{}) Result {
-   if (pf_tlevel == nil) {
+   if (pf_tlevel == nil || db.open == 0) {
       return dba_error("TLevel")
    }
    buffer_len := 0;
@@ -622,7 +628,7 @@ func (db *Database) TLevel(args ... interface{}) Result {
 
 // Transaction Commit
 func (db *Database) TCommit(args ... interface{}) Result {
-   if (pf_tcommit == nil) {
+   if (pf_tcommit == nil || db.open == 0) {
       return dba_error("TCommit")
    }
    buffer_len := 0;
@@ -648,7 +654,7 @@ func (db *Database) TCommit(args ... interface{}) Result {
 
 // Transaction Rollback
 func (db *Database) TRollback(args ... interface{}) Result {
-   if (pf_trollback == nil) {
+   if (pf_trollback == nil || db.open == 0) {
       return dba_error("TRollback")
    }
    buffer_len := 0;
@@ -698,7 +704,7 @@ func (c *Class) Reference(args ... interface{}) int {
 
 // Invoke a class method
 func (c *Class) ClassMethod(method string, args ... interface{}) Result {
-   if (pf_classmethod == nil) {
+   if (pf_classmethod == nil || c.db.open == 0) {
       return dba_error("ClassMethod")
    }
    buffer_len := c.Reference()
@@ -727,7 +733,7 @@ func (c *Class) ClassMethod(method string, args ... interface{}) Result {
 
 // Get a property value for an instantiated database object class
 func (c *Class) GetProperty(name string) Result {
-   if (pf_getproperty == nil) {
+   if (pf_getproperty == nil || c.db.open == 0) {
       return dba_error("GetProperty")
    }
    if (c.oref == -1) {
@@ -756,7 +762,7 @@ func (c *Class) GetProperty(name string) Result {
 
 // Set a property value for an instantiated database object class
 func (c *Class) SetProperty(name string, value interface{}) Result {
-   if (pf_setproperty == nil) {
+   if (pf_setproperty == nil || c.db.open == 0) {
       return dba_error("SetProperty")
    }
    if (c.oref == -1) {
@@ -786,7 +792,7 @@ func (c *Class) SetProperty(name string, value interface{}) Result {
 
 // Invoke a method for an instantiated database object class
 func (c *Class) Method(method string, args ... interface{}) Result {
-   if (pf_method == nil) {
+   if (pf_method == nil || c.db.open == 0) {
       return dba_error("Method")
    }
    if (c.oref == -1) {
@@ -817,7 +823,7 @@ func (c *Class) Method(method string, args ... interface{}) Result {
 
 
 func (db *Database) Benchmark(inputstr string) string {
-   if (pf_benchmark == nil) {
+   if (pf_benchmark == nil || db.open == 0) {
       return ""
    }
    copy(db.inputbuffer[:], inputstr)
