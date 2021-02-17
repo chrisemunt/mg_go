@@ -35,6 +35,14 @@ Version 1.0.1 3 July 2019:
 Version 1.1.2 8 January 2020:
    Network based connectivity option.
 
+Version 1.2.3 17 February 2021:
+   Introduce support for M transaction processing: tstart, $tlevel, tcommit, trollback.
+   Allow the DB server response timeout to be modified via the db.Timeout property.
+   - db.Timeout = <timeout>
+   Allow the input buffer size to be modified via the db.InputBufferSize property.
+   - db.InputBufferSize = <size>
+   Improved exception handling for DB connectivity errors.
+
 */
 
 package mg_go
@@ -67,8 +75,8 @@ import (
 )
 
 const DBX_VERSION_MAJOR    int = 1
-const DBX_VERSION_MINOR    int = 1
-const DBX_VERSION_BUILD    int = 2
+const DBX_VERSION_MINOR    int = 2
+const DBX_VERSION_BUILD    int = 3
 
 const DBX_DSORT_INVALID    byte = 0
 const DBX_DSORT_DATA       byte = 1
@@ -108,9 +116,13 @@ const DBX_CMND_CGETP       byte = 42
 const DBX_CMND_CSETP       byte = 43
 const DBX_CMND_CMETH       byte = 44
 
+const DBX_CMND_TSTART      byte = 61
+const DBX_CMND_TLEVEL      byte = 62
+const DBX_CMND_TCOMMIT     byte = 63
+const DBX_CMND_TROLLBACK   byte = 64
+
 
 const DBX_INPUT_BUFFER_SIZE   int = 32768
-const DBX_OUTPUT_BUFFER_SIZE  int = 32768
 
 // Connectivity to the database API
 type Database struct {
@@ -124,15 +136,13 @@ type Database struct {
    Username string
    Password string
    Namespace string
+   Timeout int
    Debug string
    EnvVars string
    InputBufferSize int
-   OutputBufferSize int
    index int
    inputbuffer []byte
-   outputbuffer []byte
    Cinputbuffer unsafe.Pointer
-   Coutputbuffer unsafe.Pointer
 }
 
 // Global
@@ -174,6 +184,10 @@ var pf_increment     unsafe.Pointer = nil
 var pf_lock          unsafe.Pointer = nil
 var pf_unlock        unsafe.Pointer = nil
 var pf_function      unsafe.Pointer = nil
+var pf_tstart        unsafe.Pointer = nil
+var pf_tlevel        unsafe.Pointer = nil
+var pf_tcommit       unsafe.Pointer = nil
+var pf_trollback     unsafe.Pointer = nil
 var pf_classmethod   unsafe.Pointer = nil
 var pf_method        unsafe.Pointer = nil
 var pf_getproperty   unsafe.Pointer = nil
@@ -200,15 +214,9 @@ func New(Type string) Database {
    db.Namespace = ""
    db.EnvVars = ""
    db.TCPPort = 0;
+   db.Timeout = 0;
 
    db.InputBufferSize = DBX_INPUT_BUFFER_SIZE
-   db.OutputBufferSize = DBX_OUTPUT_BUFFER_SIZE
-
-   db.Cinputbuffer = C.malloc(C.size_t(db.InputBufferSize))
-   db.Coutputbuffer = C.malloc(C.ulong(db.OutputBufferSize))
-
-   db.inputbuffer = (*[1 << 30]byte)(unsafe.Pointer(db.Cinputbuffer))[:]
-   db.outputbuffer = (*[1 << 30]byte)(unsafe.Pointer(db.Coutputbuffer))[:]
 
    return *db
 }
@@ -220,6 +228,10 @@ func (db *Database) Version() string {
       load_mg_dba(db.APImodule)
       db.index = 0
    }
+   if (pf_version == nil) {
+      return ""
+   }
+
    mod_version := Version();
    api_version := make([]byte, 256)
    C.c_dbx_version(pf_version, C.int(db.index), unsafe.Pointer(&api_version[0]), 256)
@@ -237,11 +249,17 @@ func (db *Database) Open() Result {
       load_mg_dba(db.APImodule)
       db.index = 0
    }
+   if (pf_open == nil) {
+      return dba_error("Open")
+   }
+
+   db.Cinputbuffer = C.malloc(C.size_t(db.InputBufferSize))
+   db.inputbuffer = (*[1 << 30]byte)(unsafe.Pointer(db.Cinputbuffer))[:]
 
    buffer_len := 0;
 
    block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(db.inputbuffer[:], &buffer_len, db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(db.inputbuffer[:], &buffer_len, db.Type, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
@@ -257,6 +275,7 @@ func (db *Database) Open() Result {
    block_add_string(db.inputbuffer[:], &buffer_len, db.EnvVars, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.Server, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
    block_add_string(db.inputbuffer[:], &buffer_len, db.ServerSoftware, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
+   block_add_string(db.inputbuffer[:], &buffer_len, strconv.Itoa(db.Timeout), 0, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
    add_head(db.inputbuffer[:], buffer_len, DBX_CMND_OPEN)
 
@@ -270,11 +289,13 @@ func (db *Database) Open() Result {
 
 // Close a connection to the database
 func (db *Database) Close() Result {
-
+   if (pf_close == nil) {
+      return dba_error("Close")
+   }
    buffer_len := 0;
 
    block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(db.inputbuffer[:], &buffer_len, db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
@@ -290,11 +311,13 @@ func (db *Database) Close() Result {
 
 // Get current namespace
 func (db *Database) GetNamespace() Result {
-
+   if (pf_getnamespace == nil) {
+      return dba_error("GetNamespace")
+   }
    buffer_len := 0;
 
    block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(db.inputbuffer[:], &buffer_len, db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
@@ -310,11 +333,13 @@ func (db *Database) GetNamespace() Result {
 
 // Set current namespace
 func (db *Database) SetNamespace(Namespace string) Result {
-
+   if (pf_setnamespace == nil) {
+      return dba_error("SetNamespace")
+   }
    buffer_len := 0;
 
    block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(db.inputbuffer[:], &buffer_len, db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(db.inputbuffer[:], &buffer_len, Namespace, 0, DBX_DSORT_DATA, DBX_DTYPE_STR)
@@ -351,7 +376,7 @@ func (g *Global) Reference(args ... interface{}) int {
    buffer_len := 0;
 
    block_add_size(g.db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(g.db.inputbuffer[:], &buffer_len, g.db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(g.db.inputbuffer[:], &buffer_len, g.db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(g.db.inputbuffer[:], &buffer_len, g.db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    block_add_string(g.db.inputbuffer[:], &buffer_len, g.Name, 0, DBX_DSORT_GLOBAL, DBX_DTYPE_STR)
@@ -361,6 +386,9 @@ func (g *Global) Reference(args ... interface{}) int {
 
 // Set a Global data node
 func (g *Global) Set(args ... interface{}) Result {
+   if (pf_set == nil) {
+      return dba_error("Set")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -379,6 +407,9 @@ func (g *Global) Set(args ... interface{}) Result {
 
 // Get a Global data node
 func (g *Global) Get(args ... interface{}) Result {
+   if (pf_get == nil) {
+      return dba_error("Get")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -396,6 +427,9 @@ func (g *Global) Get(args ... interface{}) Result {
 
 // Get the next key element for a Global ($Order) 
 func (g *Global) Next(args ... interface{}) Result {
+   if (pf_next == nil) {
+      return dba_error("Next")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -420,6 +454,9 @@ func (g *Global) Next(args ... interface{}) Result {
 
 // Get the previous key element for a Global (Reverse $Order)
 func (g *Global) Previous(args ... interface{}) Result {
+   if (pf_previous == nil) {
+      return dba_error("Previous")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -444,6 +481,9 @@ func (g *Global) Previous(args ... interface{}) Result {
 
 // Delete a Global reference (and all descendants)
 func (g *Global) Delete(args ... interface{}) Result {
+   if (pf_delete == nil) {
+      return dba_error("Delete")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -462,6 +502,9 @@ func (g *Global) Delete(args ... interface{}) Result {
 
 // Test that a Global reference exists ($Data)
 func (g *Global) Defined(args ... interface{}) Result {
+   if (pf_defined == nil) {
+      return dba_error("Defined")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -480,6 +523,9 @@ func (g *Global) Defined(args ... interface{}) Result {
 
 // Increment a global node
 func (g *Global) Increment(args ... interface{}) Result {
+   if (pf_increment == nil) {
+      return dba_error("Increment")
+   }
    buffer_len := g.Reference()
 
    for _, x := range args {
@@ -498,10 +544,13 @@ func (g *Global) Increment(args ... interface{}) Result {
 
 // Invoke a database function
 func (db *Database) Function(args ... interface{}) Result {
+   if (pf_function == nil) {
+      return dba_error("Function")
+   }
    buffer_len := 0;
 
    block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(db.inputbuffer[:], &buffer_len, db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    for _, x := range args {
@@ -512,6 +561,110 @@ func (db *Database) Function(args ... interface{}) Result {
    add_head(db.inputbuffer[:], buffer_len, DBX_CMND_FUNCTION)
 
    C.c_dbx_generic(pf_function, unsafe.Pointer(db.Cinputbuffer), nil)
+
+   res := get_result(db.inputbuffer)
+
+   return res
+}
+
+
+// Transaction Start
+func (db *Database) TStart(args ... interface{}) Result {
+   if (pf_tstart == nil) {
+      return dba_error("TStart")
+   }
+   buffer_len := 0;
+
+   block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
+
+   for _, x := range args {
+      block_add_item(db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
+   }
+
+   block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_TSTART)
+
+   C.c_dbx_generic(pf_tstart, unsafe.Pointer(db.Cinputbuffer), nil)
+
+   res := get_result(db.inputbuffer)
+
+   return res
+}
+
+
+// Transaction Level
+func (db *Database) TLevel(args ... interface{}) Result {
+   if (pf_tlevel == nil) {
+      return dba_error("TLevel")
+   }
+   buffer_len := 0;
+
+   block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
+
+   for _, x := range args {
+      block_add_item(db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
+   }
+
+   block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_TLEVEL)
+
+   C.c_dbx_generic(pf_tlevel, unsafe.Pointer(db.Cinputbuffer), nil)
+
+   res := get_result(db.inputbuffer)
+
+   return res
+}
+
+
+// Transaction Commit
+func (db *Database) TCommit(args ... interface{}) Result {
+   if (pf_tcommit == nil) {
+      return dba_error("TCommit")
+   }
+   buffer_len := 0;
+
+   block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
+
+   for _, x := range args {
+      block_add_item(db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
+   }
+
+   block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_TCOMMIT)
+
+   C.c_dbx_generic(pf_tcommit, unsafe.Pointer(db.Cinputbuffer), nil)
+
+   res := get_result(db.inputbuffer)
+
+   return res
+}
+
+
+// Transaction Rollback
+func (db *Database) TRollback(args ... interface{}) Result {
+   if (pf_trollback == nil) {
+      return dba_error("TRollback")
+   }
+   buffer_len := 0;
+
+   block_add_size(db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(db.inputbuffer[:], &buffer_len, db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
+
+   for _, x := range args {
+      block_add_item(db.inputbuffer[:], &buffer_len, x, 0, DBX_DSORT_DATA)
+   }
+
+   block_add_string(db.inputbuffer[:], &buffer_len, "", 0, DBX_DSORT_EOD, DBX_DTYPE_STR)
+   add_head(db.inputbuffer[:], buffer_len, DBX_CMND_TROLLBACK)
+
+   C.c_dbx_generic(pf_trollback, unsafe.Pointer(db.Cinputbuffer), nil)
 
    res := get_result(db.inputbuffer)
 
@@ -536,7 +689,7 @@ func (c *Class) Reference(args ... interface{}) int {
    buffer_len := 0
 
    block_add_size(c.db.inputbuffer[:], &buffer_len, buffer_len, DBX_DSORT_DATA, DBX_DTYPE_INT)
-   block_add_size(c.db.inputbuffer[:], &buffer_len, c.db.OutputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
+   block_add_size(c.db.inputbuffer[:], &buffer_len, c.db.InputBufferSize, DBX_DSORT_DATA, DBX_DTYPE_INT)
    block_add_size(c.db.inputbuffer[:], &buffer_len, c.db.index, DBX_DSORT_DATA, DBX_DTYPE_INT)
 
    return buffer_len
@@ -545,6 +698,9 @@ func (c *Class) Reference(args ... interface{}) int {
 
 // Invoke a class method
 func (c *Class) ClassMethod(method string, args ... interface{}) Result {
+   if (pf_classmethod == nil) {
+      return dba_error("ClassMethod")
+   }
    buffer_len := c.Reference()
 
    block_add_item(c.db.inputbuffer[:], &buffer_len, c.Name, 0, DBX_DSORT_DATA)
@@ -571,10 +727,12 @@ func (c *Class) ClassMethod(method string, args ... interface{}) Result {
 
 // Get a property value for an instantiated database object class
 func (c *Class) GetProperty(name string) Result {
-
+   if (pf_getproperty == nil) {
+      return dba_error("GetProperty")
+   }
    if (c.oref == -1) {
       res := new(Result)
-	  res.Data = ""
+	   res.Data = ""
       res.ErrorMessage = "No Object"
       res.ErrorCode = 1
       res.OK = false
@@ -598,7 +756,9 @@ func (c *Class) GetProperty(name string) Result {
 
 // Set a property value for an instantiated database object class
 func (c *Class) SetProperty(name string, value interface{}) Result {
-
+   if (pf_setproperty == nil) {
+      return dba_error("SetProperty")
+   }
    if (c.oref == -1) {
       res := new(Result)
 	  res.Data = ""
@@ -626,7 +786,9 @@ func (c *Class) SetProperty(name string, value interface{}) Result {
 
 // Invoke a method for an instantiated database object class
 func (c *Class) Method(method string, args ... interface{}) Result {
-
+   if (pf_method == nil) {
+      return dba_error("Method")
+   }
    if (c.oref == -1) {
       res := new(Result)
 	  res.Data = ""
@@ -655,7 +817,9 @@ func (c *Class) Method(method string, args ... interface{}) Result {
 
 
 func (db *Database) Benchmark(inputstr string) string {
-
+   if (pf_benchmark == nil) {
+      return ""
+   }
    copy(db.inputbuffer[:], inputstr)
 
    C.c_dbx_generic(pf_benchmark, unsafe.Pointer(db.Cinputbuffer), nil)
@@ -681,6 +845,10 @@ func Version() string {
 
 // Sleep for the specified number of milliseconds
 func Sleep(period_ms int) int {
+   if (pf_method == nil) {
+      return 0
+   }
+
    C.c_dbx_sleep(pf_sleep,  C.int(period_ms))
    res := 0
 
@@ -778,6 +946,20 @@ func get_result(buffer []byte) (Result) {
 }
 
 
+func dba_error(APIfunction string) (Result) {
+
+   res := new(Result)
+
+   res.DataType = DBX_DTYPE_STR
+   res.Data = ""
+   res.ErrorMessage = "API function '" + APIfunction + "' not available"
+   res.ErrorCode = 1
+   res.OK = false
+
+   return *res
+}
+
+
 func load_mg_dba(APImodule string) int {
    libname := C.CString(APImodule)
 
@@ -800,6 +982,10 @@ func load_mg_dba(APImodule string) int {
    pf_lock = C.dlsym(handle, C.CString("dbx_lock"))
    pf_unlock = C.dlsym(handle, C.CString("dbx_unlock"))
    pf_function = C.dlsym(handle, C.CString("dbx_function"))
+   pf_tstart = C.dlsym(handle, C.CString("dbx_tstart"))
+   pf_tlevel = C.dlsym(handle, C.CString("dbx_tlevel"))
+   pf_tcommit = C.dlsym(handle, C.CString("dbx_tcommit"))
+   pf_trollback = C.dlsym(handle, C.CString("dbx_trollback"))
    pf_classmethod = C.dlsym(handle, C.CString("dbx_classmethod"))
    pf_method = C.dlsym(handle, C.CString("dbx_method"))
    pf_getproperty = C.dlsym(handle, C.CString("dbx_getproperty"))
