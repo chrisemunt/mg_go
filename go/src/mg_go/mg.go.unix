@@ -43,6 +43,10 @@ Version 1.2.3 17 February 2021:
    - db.InputBufferSize = <size>
    Improved exception handling for DB connectivity errors.
 
+Version 1.2.4 14 March 2021:
+   Introduce support for YottaDB Transaction Processing over API based connectivity.
+   - This functionality was previously only available over network-based connectivity to YottaDB.
+
 */
 
 package mg_go
@@ -76,7 +80,7 @@ import (
 
 const DBX_VERSION_MAJOR    int = 1
 const DBX_VERSION_MINOR    int = 2
-const DBX_VERSION_BUILD    int = 3
+const DBX_VERSION_BUILD    int = 4
 
 const DBX_DSORT_INVALID    byte = 0
 const DBX_DSORT_DATA       byte = 1
