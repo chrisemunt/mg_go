@@ -3,10 +3,10 @@
 A GO Extension for InterSystems **Cache/IRIS** and **YottaDB**.
 
 Chris Munt <cmunt@mgateway.com>  
-17 February 2021, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
+14 March 2021, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
 
 
-* Current Release: Version: 1.2; Revision 3.
+* Current Release: Version: 1.2; Revision 4.
 * Two connectivity models to the InterSystems or YottaDB database are provided: High performance via the local database API or network based.
 * [Release Notes](#RelNotes) can be found at the end of this document.
 
@@ -381,8 +381,6 @@ Go invocation:
 
 M DB Servers implement Transaction Processing by means of the methods described in this section.
 
-* With YottaDB, these methods are only available over network based connectivity to the DB Server.
-
 ### Start a Transaction
 
        result := db.TStart()
@@ -538,3 +536,8 @@ Unless required by applicable law or agreed to in writing, software distributed 
 * Allow the input buffer size to be modified via the db.InputBufferSize property.
 	* db.InputBufferSize = [size]
 * Improved exception handling for DB connectivity errors.
+
+### v1.2.4 (14 March 2021)
+
+* Introduce support for YottaDB Transaction Processing over API based connectivity.
+	* This functionality was previously only available over network-based connectivity to YottaDB.
