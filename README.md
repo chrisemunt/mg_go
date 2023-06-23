@@ -3,7 +3,7 @@
 A GO Extension for InterSystems **Cache/IRIS** and **YottaDB**.
 
 Chris Munt <cmunt@mgateway.com>  
-14 March 2021, M/Gateway Developments Ltd [http://www.mgateway.com](http://www.mgateway.com)
+23 June 2023, MGateway Ltd [http://www.mgateway.com](http://www.mgateway.com)
 
 
 * Current Release: Version: 1.2; Revision 4.
@@ -82,8 +82,8 @@ Change to your development UCI and check the installation:
 
        do ^%zmgsi
 
-       M/Gateway Developments Ltd - Service Integration Gateway
-       Version: 4.0; Revision 16 (11 February 2021)
+       MGateway Ltd - Service Integration Gateway
+       Version: 4.5; Revision 28 (3 February 2023)
 
 
 #### Installation for YottaDB
@@ -111,8 +111,8 @@ Link all the **zmgsi** routines and check the installation:
 
        do ^%zmgsi
 
-       M/Gateway Developments Ltd - Service Integration Gateway
-       Version: 4.0; Revision 16 (11 February 2021)
+       MGateway Ltd - Service Integration Gateway
+       Version: 4.5; Revision 28 (3 February 2023)
 
 Note that the version of **zmgsi** is successfully displayed.
 
@@ -209,7 +209,7 @@ Assuming the server (**Cache** in this example) is listening on port **7041** on
 
 #### Connecting to the database via the MGWSI Service Integration Gateway
 
-If the M/Gateway Service Integration Gateway (**MGWSI**) is available, **mg\_go** can connect to the database via this facility.
+If the MGateway Service Integration Gateway (**MGWSI**) is available, **mg\_go** can connect to the database via this facility.
 
 Assuming the **MGWSI** Gateway is listening on port **7040** on host **localhost** and the target Server (**Cache** in this example) is named as **LOCAL** in the Service integration Gateway configuration.
 
@@ -498,7 +498,7 @@ Example:
 
 ## <a name="License"></a> License
 
-Copyright (c) 2018-2021 M/Gateway Developments Ltd,
+Copyright (c) 2018-2023 MGateway Ltd,
 Surrey UK.                                                      
 All rights reserved.
  
@@ -541,3 +541,7 @@ Unless required by applicable law or agreed to in writing, software distributed 
 
 * Introduce support for YottaDB Transaction Processing over API based connectivity.
 	* This functionality was previously only available over network-based connectivity to YottaDB.
+
+### v1.2.4a (23 June 2023)
+
+* Documentation update.
